@@ -22,13 +22,13 @@ const { copy } = Astro.props;
       <span>{copy.subtitle}</span>
     </div>
     <div class="control-groups">
-      <div class="control-group" aria-label={copy.osLabel}>
-        <button class="active" type="button" data-os="linux" aria-pressed="true">Linux</button>
-        <button type="button" data-os="windows" aria-pressed="false">Windows</button>
-      </div>
       <div class="control-group" data-shell-group aria-label={copy.shellLabel} hidden>
         <button class="active" type="button" data-shell="powershell" aria-pressed="true">PowerShell</button>
         <button type="button" data-shell="cmd" aria-pressed="false">CMD</button>
+      </div>
+      <div class="control-group" aria-label={copy.osLabel}>
+        <button class="active" type="button" data-os="linux" aria-pressed="true">Linux</button>
+        <button type="button" data-os="windows" aria-pressed="false">Windows</button>
       </div>
     </div>
   </div>
