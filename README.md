@@ -1,14 +1,35 @@
 # NodeLane Tunnel
 
-NodeLane Tunnel is the thin product layer around an unmodified frp data plane. It
-provides anonymous client identities, tunnel-scoped credentials, IP/client
-limits, bans, automatic HTTP subdomains and TCP/UDP port allocation.
+NodeLane Tunnel is a lightweight tunnel service built around the official
+[frp](https://github.com/fatedier/frp) client and server. It combines a Go
+control plane, a cross-platform `nt` client, and a localized website to expose
+local HTTP, TCP, or UDP services through a public endpoint.
 
-Public service: `tunnel.nodelane.net`
+The hosted service is available at [tunnel.nodelane.net](https://tunnel.nodelane.net/).
+HTTP tunnels use addresses such as `http://<slug>.tunnel.nodelane.net`.
 
-HTTP tunnels: `http://<slug>.tunnel.nodelane.net`
+> NodeLane Tunnel is intended for development, testing, demonstrations, and
+> short-lived collaboration. Do not expose databases, administrative panels,
+> or services containing sensitive data. The hosted service does not provide a
+> production SLA.
 
-## User commands
+## Highlights
+
+- One interactive command for HTTP, TCP, and UDP tunnels
+- Anonymous device identity; no account is required
+- Automatic HTTP subdomains and TCP/UDP port allocation
+- Per-client and per-network tunnel limits, expiry, and administrative bans
+- Tunnel-scoped signed credentials validated by the frps HTTP plugin
+- Embedded frp `0.70.0` client; no separate `frpc` installation
+- Linux and Windows packages for AMD64 and ARM64
+- SHA-256 package verification, atomic upgrades, and one-version rollback
+- Localized CLI and website in 12 languages
+- PostgreSQL-backed state and Redis-backed distributed leases
+- Container image with the website and all client release assets included
+
+## Quick start
+
+Start a local service first, then run the installer for your platform.
 
 Linux:
 
@@ -28,288 +49,303 @@ Windows CMD:
 curl -fsSL https://tunnel.nodelane.net/run.cmd | cmd
 ```
 
-The bootstrap installs the `nt` command and opens an interactive form. Use the
-arrow keys to choose HTTP, TCP, or UDP. An empty host uses `localhost`; the port
-defaults to `3000` and is validated immediately against the `1–65535` range.
+The installer downloads the current `nt` package, verifies its SHA-256 digest
+and embedded version, updates the launcher atomically, and opens an interactive
+form. Choose a protocol, enter a local host, and enter a port. An empty host is
+normalized to `localhost`; the initial port is `3000`.
 
-After the first run, start another tunnel directly:
+After installation, run `nt` again for the interactive form or provide all
+three positional arguments for a non-interactive tunnel:
 
 ```sh
 nt http localhost 3000
+nt tcp localhost 22
+nt udp localhost 5353
 ```
 
-The direct command accepts `protocol host port` for non-interactive use. If any
-value is missing, `nt` opens the same form with supplied values prefilled and
-editable.
-
-On Windows, both installers persist the command directory in the user PATH;
-PowerShell also updates the current session. Linux persists `~/.local/bin` in
-the shell startup file. Every bootstrap launches the installed executable
-directly, so the first tunnel works without reopening the terminal.
-
-The bootstrap shows a package download progress bar, verifies the SHA-256
-checksum and embedded version, and then atomically points the `nt` launcher at
-the installed version. Running the bootstrap again upgrades that launcher when
-`stable.txt` names a new release; a failed download or validation leaves the
-current client unchanged. The immediately previous version is retained for
-rollback and older versions are removed. The official frp 0.70.0 client service
-is compiled into `nt`; no separate `frpc` executable is downloaded or
-extracted. Once connected, the client highlights the public address and prints
-the NodeLane banner. HTTP tunnels log each request's time, source IP, method and
-address. TCP and UDP tunnels show live active/total connection counts and bytes
-received from and sent to the public side. Set `NO_COLOR=1` if ANSI colors are
-not wanted.
-
-## Local development
-
-Go 1.27 or newer is required. The website in `web/` uses Astro 7 with pnpm and
-requires Node.js 22 or newer.
-
-Build or preview the website:
-
-```powershell
-pnpm --dir web install
-pnpm --dir web dev
-pnpm --dir web build
-```
-
-English is served at `/`; 11 additional localized routes are generated from
-`web/src/i18n/config.ts`. Shared NodeLane design tokens and site chrome live
-in `web/src/styles/design-system.css`; Tunnel-only layouts live in
-`web/src/styles/tunnel.css`; each translation lives in its own typed file under
-`web/src/i18n/locales/`. Each language has a stable URL, including `/zh-cn/` for
-Simplified Chinese, and the language switcher navigates directly between them.
-
-The generated site is embedded from `internal/server/assets/web`. Docker and
-`deploy/package.ps1` rebuild and copy it automatically before compiling Go.
-
-```powershell
-$env:DEV_MODE = "true"
-$env:LISTEN_ADDR = ":3000"
-go run ./cmd/tunneld
-```
-
-Development mode uses in-memory storage and development-only secrets. It must
-never be enabled on the public server.
-
-Run tests and build both programs:
-
-```powershell
-go test ./...
-go build ./cmd/tunneld
-go build ./cmd/nt
-```
-
-To test the CLI against a local control server, set:
-
-```powershell
-$env:NT_API_URL = "http://127.0.0.1:3000/api/v1"
-```
-
-### Client language
-
-`nt` automatically follows the operating-system locale and supports the same
-12 languages as the website: Simplified Chinese, Traditional Chinese, English,
-Spanish, French, German, Japanese, Korean, Brazilian Portuguese, Russian,
-Arabic, and Hindi. Override the language for one invocation with `--lang`:
-
-```powershell
-nt --lang en http localhost 3000
-nt --lang zh-TW tcp localhost 22
-nt languages
-```
-
-Set `NT_LANG` to choose a persistent language. On Unix-like systems, `LC_ALL`,
-`LC_MESSAGES`, and `LANG` are used when `NT_LANG` is unset. `--lang auto` keeps
-the automatic environment and operating-system detection for that invocation.
-
-## Production deployment
-
-### Recommended: private registry image
-
-The release image is multi-architecture, contains tunneld plus all four
-single-binary `nt` client bundles, and contains no production secrets.
-Authenticate Docker to your registry once, then publish it from Windows:
-
-```powershell
-docker login docker.nodelane.net
-.\deploy\publish-image.ps1 `
-  -Registry docker.nodelane.net `
-  -Version 0.3.0 `
-  -TagStable
-```
-
-Linux and CI can use the equivalent command:
+Useful commands:
 
 ```sh
-docker login docker.nodelane.net
-sh deploy/publish-image.sh docker.nodelane.net 0.3.0
+nt help
+nt version
+nt languages
+nt --lang zh-CN http localhost 3000
 ```
 
-Set the immutable image in `.env`:
+Press `Ctrl+C` to close the tunnel. HTTP sessions print request time, source
+address, method, and URL. TCP and UDP sessions show connection and byte counts.
 
-```dotenv
-TUNNELD_IMAGE=docker.nodelane.net/nodelane/tunneld:0.3.0
-PUBLIC_SCHEME=http
+### Client configuration
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `NT_API_URL` | Control-plane API base URL | `https://tunnel.nodelane.net/api/v1` |
+| `NT_LANG` | CLI locale, or `auto` | Operating-system locale |
+| `NT_CREDENTIALS_FILE` | Anonymous client credential file | Platform user config directory |
+| `NT_CA_FILE` | Custom CA bundle for the frp TLS connection | System trust/default frp behavior |
+| `NT_FRP_PROXY_URL` | Proxy URL for the frp control connection | Unset |
+| `NT_FRP_LOG` | Set to `1` to stream embedded frp logs | Unset |
+| `NT_FRP_LOG_LEVEL` | `trace`, `debug`, `info`, `warn`, or `error` | `info` |
+| `NO_COLOR` | Disable styled terminal output when set | Unset |
+
+`--lang` overrides `NT_LANG`. On Unix-like systems, `LC_ALL`, `LC_MESSAGES`,
+and `LANG` are used when `NT_LANG` is unset.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    User[Public user] -->|HTTP / TCP / UDP| FRPS[frps data plane]
+    NT[nt client\nembedded frpc] -->|TLS control and tunnel traffic| FRPS
+    NT -->|register and request tunnel| API[tunneld API]
+    FRPS -->|authorization callbacks| API
+    API --> PG[(PostgreSQL)]
+    API --> Redis[(Redis leases)]
+    NT --> Local[Local service]
+    Proxy[Reverse proxy] -->|site, API, installers| API
+    Proxy -->|wildcard HTTP host| FRPS
 ```
 
-`PUBLIC_SCHEME` controls the URL returned for HTTP tunnels and defaults to
-`http`. Change it to `https` only after wildcard TLS termination is available
-for `*.tunnel.nodelane.net`. This setting does not control the embedded frp
-client's TLS connection to frps.
+The repository contains two executables:
 
-The production rollout is only an image pull and Compose update. It does not
-run `install.sh` or rebuild source on the server:
+- `tunneld` serves the website, client installers, release assets, public API,
+  frps authorization plugin, health check, and loopback-only administration API.
+- `nt` registers an anonymous client, requests a tunnel, starts the embedded
+  frp client, and presents tunnel activity in the terminal.
+
+frps remains the data plane. NodeLane Tunnel does not maintain a second proxy
+protocol or installer engine.
+
+## Self-hosting
+
+### Requirements
+
+- A Linux AMD64 or ARM64 host
+- Docker Engine with Compose v2; Buildx is required for multi-platform images
+- frps `0.70.0`
+- PostgreSQL and Redis
+- A base hostname and matching wildcard DNS record pointing to the host
+- A reverse proxy capable of preserving the original wildcard `Host` header
+- Firewall access for the frps control port and the configured TCP/UDP ranges
+
+The supplied Compose files use host networking. PostgreSQL, Redis, frps, the
+reverse proxy, and `tunneld` can therefore communicate through loopback without
+sharing Docker networks.
+
+### 1. Configure the service
+
+Copy the environment template:
+
+```sh
+cp .env.example .env
+```
+
+Set at least the following values:
+
+- `PUBLIC_DOMAIN`, `FRP_SERVER_ADDR`, and `FRP_TLS_SERVER_NAME` to the tunnel
+  domain you control
+- `DATABASE_URL` to an existing PostgreSQL database
+- `REDIS_ADDR` and, when enabled, `REDIS_PASSWORD`
+- distinct random values for `TOKEN_PEPPER`, `TUNNEL_JWT_SECRET`, and
+  `ADMIN_TOKEN`
+- one random `FRP_AUTH_TOKEN`, copied to `auth.token` in the frps configuration
+
+For example, `openssl rand -hex 32` produces a suitable 32-byte secret. Run it
+separately for each secret; do not reuse one value for multiple settings.
+
+The checked-in reverse-proxy, website, and frps examples use
+`tunnel.nodelane.net`. Replace that hostname when building another deployment:
+
+```sh
+git grep -n "tunnel.nodelane.net" -- deploy web
+```
+
+The generated files under `internal/server/assets/web` are replaced by the
+Docker build, so make website changes in `web/` rather than editing generated
+HTML directly.
+
+### 2. Configure frps
+
+Use one of these templates:
+
+- `deploy/frps.toml` is a complete frps `0.70.0` example.
+- `deploy/frps.additions.toml` lists the settings to merge into an existing
+  frps configuration.
+
+The values below must agree between frps and `.env`:
+
+| frps | tunneld |
+| --- | --- |
+| `bindPort` | `FRP_SERVER_PORT` |
+| `auth.token` | `FRP_AUTH_TOKEN` |
+| `subDomainHost` | `PUBLIC_DOMAIN` |
+| `allowPorts` | `TCP_PORT_*` and `UDP_PORT_*` |
+| HTTP plugin address/path | `127.0.0.1:9000/internal/frp` |
+
+Run frps with host networking when the plugin address is loopback. Validate its
+configuration before restarting it:
+
+```sh
+frps verify -c /path/to/frps.toml
+```
+
+Port `7000` must be a raw TCP route to frps. Do not put an HTTP reverse proxy or
+an HTTPS health check in front of it.
+
+### 3. Configure ingress
+
+`deploy/Caddyfile` and `deploy/openresty.conf` provide reference routes. Replace
+their hostname and certificate placeholders.
+
+| Listener | Destination | Notes |
+| --- | --- | --- |
+| Main HTTPS hostname | `127.0.0.1:9000` | Website, API, installers, and releases |
+| Wildcard HTTP/HTTPS hostname | `127.0.0.1:8080` | Preserve the original `Host` header |
+| frps control TCP port | `127.0.0.1:7000` | Raw TCP, not HTTP |
+| TCP tunnel range | `20000-29999` | Public TCP listeners by default |
+| UDP tunnel range | `30000-39999` | Public UDP listeners by default |
+
+Do not expose `/internal/*`. Keep `9000`, `8080`, PostgreSQL, and Redis bound to
+loopback or a trusted management network. If forwarding client IP headers, list
+only the reverse proxy's addresses in `TRUSTED_PROXY_CIDRS`.
+
+HTTP tunnel URLs default to `http`. Set `PUBLIC_SCHEME=https` only after the
+wildcard hostname has working TLS termination.
+
+### 4. Build and start
+
+Set `TUNNELD_VERSION` in `.env` to the version being deployed, then build the
+image and start the control plane:
+
+```sh
+docker compose --env-file .env -f deploy/compose.yaml up -d --build
+curl -fsS http://127.0.0.1:9000/healthz
+docker compose --env-file .env -f deploy/compose.yaml logs --tail=100 tunneld
+```
+
+The image build compiles `tunneld`, builds the Astro website, builds all four
+`nt` packages, and stores the packages under `/releases`. Database tables and
+indexes are created idempotently at startup; the PostgreSQL database and role
+must already exist.
+
+To deploy a prebuilt image from any OCI registry, set `TUNNELD_IMAGE` and use:
 
 ```sh
 docker compose --env-file .env -f deploy/compose.registry.yaml pull
-docker compose --env-file .env -f deploy/compose.registry.yaml up -d --remove-orphans
-curl -fsS http://127.0.0.1:9000/healthz
-docker compose --env-file .env -f deploy/compose.registry.yaml logs --tail=100 tunneld
+docker compose --env-file .env -f deploy/compose.registry.yaml up -d
 ```
 
-No database migration is required for this change. An existing `.env` without
-`PUBLIC_SCHEME` also defaults to `http`, so pulling and recreating the container
-is sufficient for tunneld itself. The external 1Panel/OpenResty/Caddy wildcard
-route is not managed by the image and must separately accept port 80 without an
-HTTP-to-HTTPS redirect.
+Publish a multi-platform image with the included scripts. Replace the account,
+repository, and version in these examples.
 
-In 1Panel, use the same image, host networking, and `.env`. Do not mount an old
-host release directory over `/releases`, because the image already carries the
-matching client bundles. The image deliberately does not contain `.env`.
-`deploy/compose.1panel.yaml` is ready for an `.env` stored at
-`/opt/nodelane/tunnel/.env`.
-
-For a registry served over plain HTTP, configure it as an insecure registry in
-the Docker daemon on both hosts. Registry credentials and daemon trust settings
-are intentionally not accepted by the publish scripts.
-
-### Private bundle fallback
-
-On the development Windows machine (replace the version when publishing a new
-release):
+PowerShell:
 
 ```powershell
-.\deploy\package.ps1 -Version 0.1.4
+docker login ghcr.io
+.\deploy\publish-image.ps1 `
+  -Registry ghcr.io `
+  -Repository your-account/nodelane-tunneld `
+  -Version 0.4.2 `
+  -TagStable
 ```
 
-Upload `dist/nodelane-tunnel-0.1.4-linux.tar.gz` and its `.sha256` file to the
-server. The archive already contains Linux server binaries for amd64/arm64,
-four single-binary client releases with embedded frp 0.70.0, production
-secrets, `.env`, frps config
-and the installer. Keep it private because it contains secrets.
-
-On the server:
+POSIX shell:
 
 ```sh
-sha256sum -c nodelane-tunnel-0.1.4-linux.tar.gz.sha256
-mkdir -p /opt/nodelane
-tar -xzf nodelane-tunnel-0.1.4-linux.tar.gz -C /opt/nodelane
-cd /opt/nodelane/tunnel
-# Set DATABASE_URL and REDIS_PASSWORD in .env, then:
-sh install.sh
+docker login ghcr.io
+sh deploy/publish-image.sh ghcr.io 0.4.2 your-account/nodelane-tunneld
 ```
 
-The installer selects the server architecture, starts only `tunneld`, publishes
-the already-bundled client files, and checks its own health. PostgreSQL and
-Redis are external dependencies reached through `127.0.0.1:5432` and
-`127.0.0.1:6379`; runtime configuration does not contain their container or
-Docker network names. The installer does not inspect or change frps,
-PostgreSQL, Redis, 1Panel, OpenResty, firewall rules, DNS, systemd, or unrelated
-Docker resources. At startup, `tunneld` idempotently initializes only its own
-tables and indexes in the database selected by `DATABASE_URL`; that database
-and login role must already exist.
+No registry credentials are accepted by the scripts; authenticate with Docker
+before publishing.
 
-After reviewing the generated `frps.toml`, apply it to frps manually. Then add
-these two reverse proxies manually in 1Panel:
+### 5. Point clients to another deployment
 
-- `tunnel.nodelane.net` → `http://127.0.0.1:9000`
-- `*.tunnel.nodelane.net` → `http://127.0.0.1:8080` with the original Host
-  header preserved; expose this proxy on public port 80 while
-  `PUBLIC_SCHEME=http`, without forcing an HTTPS redirect
-
-### Source deployment fallback
-
-1. Copy `.env.example` to `.env` and replace every secret.
-2. Use `deploy/frps.toml` as the complete frps 0.70.0 configuration, or merge
-   `deploy/frps.additions.toml` into an existing advanced configuration.
-3. Merge `deploy/openresty.conf` into the existing OpenResty configuration.
-   `deploy/Caddyfile` remains available for installations that use Caddy.
-4. Open the configured TCP and UDP public port ranges in the host firewall and
-   cloud security group. Keep ports `8080`, `9000`, PostgreSQL and Redis private.
-5. From the repository root, start the control plane with
-   `docker compose --env-file .env -f deploy/compose.yaml up -d`.
-6. Restart frps only after `frps verify -c /path/to/frps.toml` succeeds.
-7. Publish release artifacts under `/srv/nodelane/tunnel/releases/<version>` and
-   write the active version to `/srv/nodelane/tunnel/releases/stable.txt`.
-
-For a first release directly on the Linux server (Docker required, host Go is
-not required), run:
+The distributed `nt` client defaults to the hosted NodeLane API. Set
+`NT_API_URL` for another control plane:
 
 ```sh
-sh deploy/build-release.sh 0.1.0
+export NT_API_URL=https://tunnel.example.com/api/v1
+nt http localhost 3000
 ```
 
-This builds all four supported single-binary client targets with frp 0.70.0
-embedded, writes SHA-256 files and atomically activates the version through
-`stable.txt`.
+The bootstrap scripts also support `NT_RELEASE_BASE` and `NT_BIN_DIR` overrides.
+The CMD bootstrap additionally supports `NT_INSTALL_URL`.
 
-The embedded frp client uses frp's encrypted default TLS transport and does not
-require the OpenResty/1Panel HTTPS certificate. Optional server identity
-verification can be enabled later by distributing a CA file through
-`NT_CA_FILE`.
+## Server configuration
 
-The provided Compose deployment targets Linux: `tunneld` uses host networking
-so 1Panel/OpenResty, frps, PostgreSQL and Redis can all be reached through
-stable loopback ports without coupling the application to Docker resource
-names. The standard Compose file contains only `tunneld`.
+`DEV_MODE=true` supplies development-only secrets and permits in-memory storage.
+Never enable it on an Internet-facing instance.
 
-When Cloudflare proxying is enabled, OpenResty must restore `$remote_addr` from
-`CF-Connecting-IP` only for Cloudflare source ranges. The supplied
-`deploy/openresty.conf` includes the current ranges and forwards the normalized
-address as `X-Real-IP`. Keep the origin behind a firewall that accepts HTTPS
-from Cloudflare ranges only, and update the ranges from
-<https://www.cloudflare.com/ips/> when Cloudflare publishes changes.
+### Runtime and public addresses
 
-## Required frps values
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DEV_MODE` | `false` | Enable local development behavior |
+| `LISTEN_ADDR` | `:9000` | HTTP control-plane listener |
+| `RELEASE_DIR` | unset | Directory exposed at `/releases/` |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
+| `PUBLIC_SCHEME` | `http` | Scheme returned for HTTP tunnels |
+| `PUBLIC_DOMAIN` | `tunnel.nodelane.net` | Base hostname for generated tunnel URLs |
+| `NODE_ID` | `primary` | Node identifier stored with tunnel leases |
 
-The deployment currently targets stilleshan/frps `0.70.0`, running with host
-networking and the default control port `7000`. The generated configuration
-uses private HTTP ingress port `8080`, TCP ports `20000-29999`, and UDP ports
-`30000-39999`. The public ranges must be allowed by the host firewall and
-cloud security group before those tunnel types are usable.
+### frp
 
-The private bundle generates one random `auth.token` and writes the identical
-value to `FRP_AUTH_TOKEN` in `.env`. Keep both files private. frp transport
-encryption does not require the public 1Panel certificate or its private key;
-1Panel continues to manage public HTTPS independently.
+| Variable | Default | Description |
+| --- | --- | --- |
+| `FRP_SERVER_ADDR` | `tunnel.nodelane.net` | Address returned to clients |
+| `FRP_SERVER_PORT` | `7000` | frps control port |
+| `FRP_AUTH_TOKEN` | required | Shared frp authentication token |
+| `FRP_TLS_SERVER_NAME` | `tunnel.nodelane.net` | Optional TLS server name returned to clients |
+| `FRP_BANDWIDTH_LIMIT` | `5MB` | Per-tunnel server-side bandwidth limit |
 
-## FRP protocol compatibility and diagnostics
+### Storage, identity, and limits
 
-`nt` embeds the official frp `0.70.0` client service and explicitly selects
-TCP, TLS, yamux, and wire protocol v1. It uses the official `clientID` field and
-requires the `user` field to remain empty because `user` prefixes proxy names.
-The client and server also declare the same `HeartBeats` and `NewWorkConns` auth
-scopes; omitting them on the client creates a proxy that appears online but
-rejects every work connection.
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DATABASE_URL` | required in production | PostgreSQL connection string |
+| `REDIS_ADDR` | required in production | Redis address |
+| `REDIS_PASSWORD` | unset | Redis password |
+| `REDIS_PREFIX` | `nodelane:tunnel` | Redis key namespace |
+| `TOKEN_PEPPER` | required | Pepper for hashed client tokens |
+| `TUNNEL_JWT_SECRET` | required, at least 32 bytes | Tunnel credential signing key |
+| `ADMIN_TOKEN` | unset | Bearer token for administrative endpoints |
+| `TUNNEL_TTL` | `1h` | Tunnel lifetime |
+| `MAX_TUNNELS_PER_CLIENT` | `1` | Concurrent tunnels per anonymous client |
+| `MAX_TUNNELS_PER_IP` | `2` | Concurrent tunnels per source network |
+| `TCP_PORT_START` / `TCP_PORT_END` | `20000` / `29999` | TCP allocation range |
+| `UDP_PORT_START` / `UDP_PORT_END` | `30000` / `39999` | UDP allocation range |
+| `TRUSTED_PROXY_CIDRS` | unset | Proxies allowed to supply forwarding headers |
 
-Every HTTP request now has an `X-Request-ID`. FRP callbacks additionally log
-the upstream `X-Frp-Reqid`, operation, validation stage, run ID, tunnel ID,
-proxy name, decision, status, and duration without logging credentials. Set
-`LOG_LEVEL=debug` for callback receipt and heartbeat/work-connection details.
-Set `NT_FRP_LOG=1` and optionally `NT_FRP_LOG_LEVEL=trace` on a client to
-stream embedded frp diagnostics instead of showing them only when startup
-fails.
+## Operations and diagnostics
 
-`yamux: Invalid protocol version: 71` means the first decrypted byte was ASCII
-`G`, normally the beginning of an HTTP `GET`. This happens before any HTTP
-plugin callback. Check that port 7000 is a raw TCP route to frps, is not an
-HTTPS health-check target, and is not reached with `transport.protocol =
-"wss"` unless a reverse proxy terminates WSS before frps. The companion
-[troubleshooting guide](docs/frp-troubleshooting.md) separates transport and
-callback checks.
+Check the control plane:
+
+```sh
+curl -fsS http://127.0.0.1:9000/healthz
+docker compose --env-file .env -f deploy/compose.yaml ps
+docker compose --env-file .env -f deploy/compose.yaml logs -f tunneld
+```
+
+Every API request receives an `X-Request-ID`. frps callback logs include the
+upstream request ID, operation, validation stage, tunnel identifiers, decision,
+status, and duration without logging credentials. Use `LOG_LEVEL=debug` for
+callback receipt and heartbeat/work-connection details.
+
+If the client reports `yamux: Invalid protocol version: 71`, the first
+decrypted byte is usually the `G` from an HTTP `GET`. Verify that the frps
+control port is exposed as raw TCP, that no layer-7 proxy or HTTP health check
+targets it, and that `transport.protocol` remains `tcp` unless a matching proxy
+terminates another transport in front of frps.
+
+If a proxy appears online but rejects every work connection, verify that both
+client and server use `auth.additionalScopes = ["HeartBeats", "NewWorkConns"]`
+and that frps has the NodeLane HTTP plugin enabled for every listed operation.
 
 ## Administrative bans
+
+Administrative routes should be called only through loopback or a trusted
+management network.
 
 Ban a client:
 
@@ -320,7 +356,7 @@ curl -X POST http://127.0.0.1:9000/internal/admin/clients/cli_xxx/ban \
   -d '{"reason":"abuse"}'
 ```
 
-Ban an IPv4, IPv6 or CIDR range:
+Ban an IPv4 address, IPv6 address, or CIDR range:
 
 ```sh
 curl -X POST http://127.0.0.1:9000/internal/admin/ip-bans \
@@ -329,5 +365,71 @@ curl -X POST http://127.0.0.1:9000/internal/admin/ip-bans \
   -d '{"network":"203.0.113.0/24","scope":"tunnel_client","reason":"abuse"}'
 ```
 
-The example Caddyfile intentionally does not expose `/internal/*`. Invoke these
-administrative endpoints through loopback or a private management network.
+## Development
+
+Go `1.27` or newer is required. The website uses Astro `7`, pnpm `10`, and
+Node.js `22` or newer; the container build currently uses Node.js `24`.
+
+Run the server with in-memory development state:
+
+```powershell
+$env:DEV_MODE = "true"
+$env:LISTEN_ADDR = ":3000"
+go run ./cmd/tunneld
+```
+
+Run the CLI against it in another terminal:
+
+```powershell
+$env:NT_API_URL = "http://127.0.0.1:3000/api/v1"
+go run ./cmd/nt http localhost 8080
+```
+
+Build and check the website:
+
+```sh
+pnpm --dir web install --frozen-lockfile
+pnpm --dir web check
+pnpm --dir web build
+```
+
+Run the Go test and build suite:
+
+```sh
+go test ./...
+go build ./cmd/tunneld
+go build ./cmd/nt
+```
+
+The Docker build copies `web/dist` into `internal/server/assets/web`. Generated
+website output is also committed so ordinary Go builds do not require Node.js.
+
+## Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `cmd/nt` | Interactive tunnel client and terminal UI |
+| `cmd/tunneld` | Control-plane executable |
+| `internal/client` | API, credentials, embedded frp configuration |
+| `internal/server` | HTTP API, plugin callbacks, static assets, admin routes |
+| `internal/store` | In-memory and PostgreSQL repositories |
+| `internal/lease` | In-memory and Redis lease managers |
+| `web` | Astro website and translations |
+| `deploy` | Compose, frps, reverse-proxy, build, and publish examples |
+| `.github/workflows/release.yml` | Tagged `nt` release packages for four targets |
+
+## Contributing and security
+
+Bug reports and focused pull requests are welcome through
+[GitHub Issues](https://github.com/Wy2926/nodelane-tunneld/issues). Include the
+operating system, architecture, `nt version`, protocol, and redacted logs.
+
+Report vulnerabilities privately through
+[GitHub Security Advisories](https://github.com/Wy2926/nodelane-tunneld/security/advisories/new).
+Do not include client tokens, tunnel credentials, frp tokens, database URLs, or
+administrator tokens in an issue.
+
+## License
+
+NodeLane Tunnel is licensed under the [MIT License](LICENSE). Distributed `nt`
+packages also include the frp license alongside the binary.

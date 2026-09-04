@@ -3,14 +3,14 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      args:
+        VERSION: ${TUNNELD_VERSION:-dev}
     restart: unless-stopped
     # Production target is Linux. Host networking preserves the loopback
     # trust boundary between Caddy/frps and tunneld.
     network_mode: host
     env_file:
       - ../.env
-    volumes:
-      - /srv/nodelane/tunnel/releases:/releases:ro
     logging:
       driver: json-file
       options:

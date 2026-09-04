@@ -5,7 +5,7 @@
 # Existing control listener; keep the deployed value when it differs.
 bindPort = 7000
 
-# 1Panel/OpenResty forwards wildcard HTTP traffic here. Keep this port private
+# The wildcard HTTP reverse proxy forwards traffic here. Keep this port private
 # in the firewall/security group and preserve the original Host header.
 vhostHTTPPort = 8080
 subDomainHost = "tunnel.nodelane.net"
@@ -24,7 +24,7 @@ auth.token = "REPLACE_WITH_EXISTING_FRPS_TOKEN"
 auth.additionalScopes = ["HeartBeats", "NewWorkConns"]
 
 # frp 0.70 enables encrypted TLS transport by default and can generate its own
-# transport certificate. Public HTTPS remains terminated by OpenResty/1Panel.
+# transport certificate. Public HTTPS remains terminated by the reverse proxy.
 transport.tls.force = true
 transport.tcpMux = true
 transport.tcpMuxKeepaliveInterval = 30

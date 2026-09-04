@@ -1,6 +1,6 @@
 services:
   tunneld:
-    image: ${TUNNELD_IMAGE:?Set TUNNELD_IMAGE to the private registry image}
+    image: ${TUNNELD_IMAGE:?Set TUNNELD_IMAGE to an OCI image reference}
     pull_policy: always
     restart: unless-stopped
     init: true

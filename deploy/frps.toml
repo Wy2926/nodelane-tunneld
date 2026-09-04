@@ -6,7 +6,7 @@
 bindAddr = "0.0.0.0"
 bindPort = 7000
 
-# HTTP tunnel traffic enters here from the public port 80 proxy in 1Panel.
+# HTTP tunnel traffic enters here from the public reverse proxy.
 # Keep 8080 private; the wildcard reverse proxy forwards requests to this port
 # and must preserve the original Host header.
 vhostHTTPPort = 8080
@@ -27,8 +27,8 @@ auth.method = "token"
 auth.token = "REPLACE_WITH_64_HEX_CHARACTERS"
 auth.additionalScopes = ["HeartBeats", "NewWorkConns"]
 
-# frp control traffic is encrypted. This does not use or change the public
-# tunnel.nodelane.net certificate managed by 1Panel/OpenResty.
+# frp control traffic is encrypted independently of the certificate used by
+# the public HTTP reverse proxy.
 transport.tls.force = true
 transport.tcpMux = true
 transport.tcpMuxKeepaliveInterval = 30

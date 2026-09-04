@@ -33,6 +33,6 @@ pnpm build
 ```
 
 The production build is copied to `internal/server/assets/web` before the Go
-binary is compiled. The Dockerfile and `deploy/package.ps1` perform this step
-automatically. Generated output is committed as well so ordinary Go builds and
-tests continue to work without requiring Node.js.
+binary is compiled. The Dockerfile performs this step automatically. Generated
+output is committed as well so ordinary Go builds and tests continue to work
+without requiring Node.js.

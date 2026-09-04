@@ -23,8 +23,9 @@ https://tunnel.nodelane.net {
     }
 
     handle /releases/* {
-        root * /srv/nodelane/tunnel
-        file_server
+        reverse_proxy 127.0.0.1:9000 {
+            header_up X-Real-IP {remote_host}
+        }
     }
 
     handle /internal/* {
