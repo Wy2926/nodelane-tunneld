@@ -15,10 +15,6 @@ const { copy } = Astro.props;
   data-copy-label={copy.copy}
   data-copied-label={copy.copied}
   data-selected-label={copy.selected}
-  data-forwarding-template={copy.forwarding}
-  data-http-label={copy.publicLabels.http}
-  data-tcp-label={copy.publicLabels.tcp}
-  data-udp-label={copy.publicLabels.udp}
 >
   <div class="quickstart-head">
     <div class="quickstart-title">
@@ -30,21 +26,20 @@ const { copy } = Astro.props;
         <button class="active" type="button" data-os="linux" aria-pressed="true">Linux</button>
         <button type="button" data-os="windows" aria-pressed="false">Windows</button>
       </div>
-      <div class="control-group" aria-label={copy.protocolLabel}>
-        <button class="active" type="button" data-protocol="http" aria-pressed="true">HTTP</button>
-        <button type="button" data-protocol="tcp" aria-pressed="false">TCP</button>
-        <button type="button" data-protocol="udp" aria-pressed="false">UDP</button>
+      <div class="control-group" data-shell-group aria-label={copy.shellLabel} hidden>
+        <button class="active" type="button" data-shell="powershell" aria-pressed="true">PowerShell</button>
+        <button type="button" data-shell="cmd" aria-pressed="false">CMD</button>
       </div>
     </div>
   </div>
   <div class="command-wrap">
     <div class="command">
       <span class="prompt" data-prompt aria-hidden="true">$</span>
-      <pre><code data-command>export PATH="$HOME/.local/bin:$PATH"; curl -fsSL https://tunnel.nodelane.net/run.sh | sh -s -- http localhost 3000</code></pre>
+      <pre><code data-command>curl -fsSL https://tunnel.nodelane.net/run.sh | sh</code></pre>
       <button class="copy" data-copy type="button" aria-live="polite">{copy.copy}</button>
     </div>
     <div class="quickstart-note">
-      <code data-forwarding>localhost:3000 → {copy.publicLabels.http}</code>
+      <code>{copy.afterRun}</code>
       <span>{copy.anonymous}</span>
     </div>
   </div>
@@ -52,16 +47,16 @@ const { copy } = Astro.props;
 
 <script>
   type OperatingSystem = "linux" | "windows";
-  type Protocol = "http" | "tcp" | "udp";
+  type WindowsShell = "powershell" | "cmd";
 
-  const ports: Record<Protocol, number> = { http: 3000, tcp: 22, udp: 5353 };
+  const commands = {
+    linux: "curl -fsSL https://tunnel.nodelane.net/run.sh | sh",
+    powershell: "irm https://tunnel.nodelane.net/run.ps1 | iex",
+    cmd: "curl -fsSL https://tunnel.nodelane.net/run.cmd | cmd",
+  } as const;
 
-  function commandFor(os: OperatingSystem, protocol: Protocol): string {
-    const suffix = `${protocol} localhost ${ports[protocol]}`;
-    if (os === "windows") {
-      return `& ([scriptblock]::Create((irm 'https://tunnel.nodelane.net/run.ps1'))) ${suffix}`;
-    }
-    return `export PATH="$HOME/.local/bin:$PATH"; curl -fsSL https://tunnel.nodelane.net/run.sh | sh -s -- ${suffix}`;
+  function commandFor(os: OperatingSystem, shell: WindowsShell): string {
+    return os === "linux" ? commands.linux : commands[shell];
   }
 
   function selectPlainText(text: string): { copied: boolean; cleanup: () => void } {
@@ -107,33 +102,30 @@ const { copy } = Astro.props;
 
   function initializeCommandBuilder(root: HTMLElement): void {
     const command = root.querySelector<HTMLElement>("[data-command]");
-    const forwarding = root.querySelector<HTMLElement>("[data-forwarding]");
     const prompt = root.querySelector<HTMLElement>("[data-prompt]");
     const copyButton = root.querySelector<HTMLButtonElement>("[data-copy]");
-    if (!command || !forwarding || !prompt || !copyButton) return;
+    const shellGroup = root.querySelector<HTMLElement>("[data-shell-group]");
+    if (!command || !prompt || !copyButton || !shellGroup) return;
 
-    const state: { os: OperatingSystem; protocol: Protocol } = {
+    const state: { os: OperatingSystem; shell: WindowsShell } = {
       os: /Windows/i.test(navigator.userAgent) ? "windows" : "linux",
-      protocol: "http",
+      shell: "powershell",
     };
 
     const setPressed = (selector: string, value: string): void => {
       root.querySelectorAll<HTMLButtonElement>(selector).forEach((button) => {
-        const active = button.dataset.os === value || button.dataset.protocol === value;
+        const active = button.dataset.os === value || button.dataset.shell === value;
         button.classList.toggle("active", active);
         button.setAttribute("aria-pressed", String(active));
       });
     };
 
     const render = (): void => {
-      command.textContent = commandFor(state.os, state.protocol);
-      prompt.textContent = state.os === "windows" ? "PS>" : "$";
-      const label = root.dataset[`${state.protocol}Label`] ?? state.protocol.toUpperCase();
-      forwarding.textContent = (root.dataset.forwardingTemplate ?? "localhost:{port} → {protocol}")
-        .replace("{port}", String(ports[state.protocol]))
-        .replace("{protocol}", label);
+      command.textContent = commandFor(state.os, state.shell);
+      prompt.textContent = state.os === "linux" ? "$" : state.shell === "powershell" ? "PS>" : ">";
+      shellGroup.hidden = state.os !== "windows";
       setPressed("[data-os]", state.os);
-      setPressed("[data-protocol]", state.protocol);
+      setPressed("[data-shell]", state.shell);
     };
 
     root.querySelectorAll<HTMLButtonElement>("[data-os]").forEach((button) => {
@@ -143,15 +135,15 @@ const { copy } = Astro.props;
       });
     });
 
-    root.querySelectorAll<HTMLButtonElement>("[data-protocol]").forEach((button) => {
+    root.querySelectorAll<HTMLButtonElement>("[data-shell]").forEach((button) => {
       button.addEventListener("click", () => {
-        state.protocol = button.dataset.protocol as Protocol;
+        state.shell = button.dataset.shell as WindowsShell;
         render();
       });
     });
 
     copyButton.addEventListener("click", async () => {
-      const text = commandFor(state.os, state.protocol);
+      const text = commandFor(state.os, state.shell);
       const result = await copyPlainText(text);
       const status = result.copied
         ? root.dataset.copiedLabel ?? "Copied"

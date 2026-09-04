@@ -38,15 +38,14 @@ export default defineTranslation({
   quickstart: {
     ariaLabel: "أمر تشغيل NodeLane Tunnel",
     title: "بدء سريع",
-    subtitle: "اختر البيئة والبروتوكول، ثم انسخ الأمر",
+    subtitle: "شغّل المثبّت، ثم اختر تفاصيل النفق",
     osLabel: "نظام التشغيل",
-    protocolLabel: "البروتوكول",
+    shellLabel: "صدفة Windows",
     copy: "نسخ الأمر",
     copied: "تم النسخ",
     selected: "تم التحديد",
     anonymous: "استخدام مجهول · لا يلزم حساب",
-    forwarding: "localhost:{port} → {protocol} عام",
-    publicLabels: { http: "HTTP", tcp: "TCP", udp: "UDP" },
+    afterRun: "التالي: اختر البروتوكول · المضيف الفارغ = localhost · المنفذ الافتراضي 3000",
   },
   protocols: {
     topline: "02 / البروتوكولات",

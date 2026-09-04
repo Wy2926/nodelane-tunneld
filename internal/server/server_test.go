@@ -124,6 +124,32 @@ func TestFrontendServesLocalizedPagesAndSEOFiles(t *testing.T) {
 	}
 }
 
+func TestEmbeddedFrontendShowsParameterFreeBootstrapCommands(t *testing.T) {
+	_, handler := testServer()
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("frontend status=%d, want 200", response.Code)
+	}
+
+	body := response.Body.String()
+	for _, command := range []string{
+		"curl -fsSL https://tunnel.nodelane.net/run.sh | sh",
+		"irm https://tunnel.nodelane.net/run.ps1 | iex",
+		"curl -fsSL https://tunnel.nodelane.net/run.cmd | cmd",
+	} {
+		if !strings.Contains(body, command) {
+			t.Errorf("frontend does not contain bootstrap command %q", command)
+		}
+	}
+	for _, retired := range []string{"sh -s -- http localhost 3000", "scriptblock]::Create", "data-protocol="} {
+		if strings.Contains(body, retired) {
+			t.Errorf("frontend still contains retired command builder fragment %q", retired)
+		}
+	}
+}
+
 func TestCMDPipeBootstrapPreservesInstallerExitCode(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("requires cmd.exe and Windows curl.exe")

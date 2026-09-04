@@ -38,15 +38,14 @@ export default defineTranslation({
   quickstart: {
     ariaLabel: "Comando de inicio de NodeLane Tunnel",
     title: "Inicio rápido",
-    subtitle: "Elige el entorno y el protocolo; después copia el comando",
+    subtitle: "Ejecuta el instalador y elige los datos del túnel",
     osLabel: "Sistema operativo",
-    protocolLabel: "Protocolo",
+    shellLabel: "Terminal de Windows",
     copy: "Copiar comando",
     copied: "Copiado",
     selected: "Seleccionado",
     anonymous: "Uso anónimo · No requiere cuenta",
-    forwarding: "localhost:{port} → {protocol} público",
-    publicLabels: { http: "HTTP", tcp: "TCP", udp: "UDP" },
+    afterRun: "Después: elige un protocolo · host vacío = localhost · puerto predeterminado 3000",
   },
   protocols: {
     topline: "02 / Protocolos",

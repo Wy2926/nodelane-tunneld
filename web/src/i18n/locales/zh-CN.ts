@@ -38,15 +38,14 @@ export default defineTranslation({
   quickstart: {
     ariaLabel: "NodeLane Tunnel 启动命令",
     title: "快速开始",
-    subtitle: "选择环境与协议，然后复制命令",
+    subtitle: "运行安装命令，然后选择隧道参数",
     osLabel: "操作系统",
-    protocolLabel: "协议",
+    shellLabel: "Windows 终端",
     copy: "复制命令",
     copied: "已复制",
     selected: "已选中",
     anonymous: "匿名可用 · 无需账号",
-    forwarding: "localhost:{port} → 公网 {protocol}",
-    publicLabels: { http: "HTTP", tcp: "TCP", udp: "UDP" },
+    afterRun: "下一步：选择协议 · 主机留空使用 localhost · 端口默认 3000",
   },
   protocols: {
     topline: "02 / 协议",

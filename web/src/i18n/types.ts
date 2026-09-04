@@ -33,17 +33,12 @@ export interface Translation {
     title: string;
     subtitle: string;
     osLabel: string;
-    protocolLabel: string;
+    shellLabel: string;
     copy: string;
     copied: string;
     selected: string;
     anonymous: string;
-    forwarding: string;
-    publicLabels: {
-      http: string;
-      tcp: string;
-      udp: string;
-    };
+    afterRun: string;
   };
   protocols: {
     topline: string;

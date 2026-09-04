@@ -202,6 +202,7 @@ h1 em { margin-inline: .1em; color: var(--mint); font-style: normal; }
   border-radius: 7px;
   background: rgb(255 255 255 / 2%);
 }
+.control-group[hidden] { display: none; }
 
 .control-group button {
   min-width: 58px;
@@ -217,6 +218,7 @@ h1 em { margin-inline: .1em; color: var(--mint); font-style: normal; }
 
 .control-group button:hover { color: var(--text); }
 .control-group button.active { border-color: var(--line-strong); background: var(--panel-light); color: var(--text); }
+:where(.control-group button, .copy):focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
 
 .command-wrap { padding: 24px 27px 21px; }
 .command {
@@ -250,7 +252,7 @@ pre code { color: #edf5f2; font-size: clamp(13px, 1.18vw, 16px); font-weight: 52
 
 .copy:hover { filter: brightness(1.06); transform: translateY(-1px); }
 .quickstart-note { margin-top: 13px; display: flex; align-items: center; justify-content: space-between; gap: 16px; color: var(--subtle); font-size: 12px; }
-.quickstart-note code { color: var(--blue); }
+.quickstart-note code { color: var(--blue); line-height: 1.5; }
 
 .scroll-cue {
   position: absolute;
