@@ -140,6 +140,7 @@ func buildTargetForm(values *targetFormValues, ui *consoleUI) *huh.Form {
 
 	form := huh.NewForm(huh.NewGroup(protocol, host, port)).
 		WithAccessible(false).
+		WithTheme(nodeLaneFormTheme()).
 		WithShowErrors(true).
 		WithShowHelp(false)
 	for field := targetProtocol; field < values.Focus; field++ {
@@ -149,6 +150,8 @@ func buildTargetForm(values *targetFormValues, ui *consoleUI) *huh.Form {
 }
 
 func runTargetForm(values *targetFormValues, input io.Reader, output io.Writer, ui *consoleUI) error {
+	ui.banner()
+	_, _ = io.WriteString(ui.out, "\n")
 	err := buildTargetForm(values, ui).
 		WithInput(input).
 		WithOutput(output).

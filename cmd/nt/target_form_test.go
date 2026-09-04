@@ -116,6 +116,9 @@ func TestRunTargetFormReturnsQuietCancellation(t *testing.T) {
 	if !errors.Is(err, errTargetFormCanceled) {
 		t.Fatalf("error = %v, want errTargetFormCanceled", err)
 	}
+	if !strings.Contains(output.String(), "NodeLane Tunnel") {
+		t.Fatalf("interactive output is missing the brand: %q", output.String())
+	}
 }
 
 func TestArgumentsNeedPromptWheneverAnyPositionIsMissing(t *testing.T) {

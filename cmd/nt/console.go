@@ -10,27 +10,83 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
+	"github.com/charmbracelet/x/ansi"
 )
 
-const brandArt = `
- _   _  ___  ____  _____ _        _    _   _ _____
-| \ | |/ _ \|  _ \| ____| |      / \  | \ | | ____|
-|  \| | | | | | | |  _| | |     / _ \ |  \| |  _|
-| |\  | |_| | |_| | |___| |___ / ___ \| |\  | |___
-|_| \_|\___/|____/|_____|_____/_/   \_\_| \_|_____|
-                       T U N N E L`
+type consoleStyles struct {
+	brand        lipgloss.Style
+	step         lipgloss.Style
+	success      lipgloss.Style
+	warning      lipgloss.Style
+	failure      lipgloss.Style
+	muted        lipgloss.Style
+	value        lipgloss.Style
+	public       lipgloss.Style
+	protocol     lipgloss.Style
+	methodRead   lipgloss.Style
+	methodWrite  lipgloss.Style
+	methodDelete lipgloss.Style
+}
+
+func newConsoleStyles() consoleStyles {
+	return consoleStyles{
+		brand:        lipgloss.NewStyle().Foreground(lipgloss.BrightCyan).Bold(true),
+		step:         lipgloss.NewStyle().Foreground(lipgloss.BrightCyan).Bold(true),
+		success:      lipgloss.NewStyle().Foreground(lipgloss.BrightGreen).Bold(true),
+		warning:      lipgloss.NewStyle().Foreground(lipgloss.BrightYellow).Bold(true),
+		failure:      lipgloss.NewStyle().Foreground(lipgloss.BrightRed).Bold(true),
+		muted:        lipgloss.NewStyle().Foreground(lipgloss.BrightBlack),
+		value:        lipgloss.NewStyle().Foreground(lipgloss.BrightWhite),
+		public:       lipgloss.NewStyle().Foreground(lipgloss.BrightGreen).Bold(true),
+		protocol:     lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta).Bold(true),
+		methodRead:   lipgloss.NewStyle().Foreground(lipgloss.BrightBlue).Bold(true),
+		methodWrite:  lipgloss.NewStyle().Foreground(lipgloss.BrightYellow).Bold(true),
+		methodDelete: lipgloss.NewStyle().Foreground(lipgloss.BrightRed).Bold(true),
+	}
+}
 
 type consoleUI struct {
-	out       io.Writer
-	err       io.Writer
-	color     bool
-	localizer localizer
-	mu        sync.Mutex
-	statusSet bool
+	out         io.Writer
+	err         io.Writer
+	color       bool
+	interactive bool
+	styles      consoleStyles
+	localizer   localizer
+	mu          sync.Mutex
+	statusSet   bool
+	warnings    map[string]struct{}
 }
 
 func newConsoleUI(out, errOut io.Writer) *consoleUI {
-	return &consoleUI{out: out, err: errOut, color: supportsColor(out), localizer: newLocalizer("en")}
+	enableWindowsANSI(out)
+	enableWindowsANSI(errOut)
+	return &consoleUI{
+		out:         colorWriter(out),
+		err:         colorWriter(errOut),
+		color:       supportsColor(out),
+		interactive: isInteractiveWriter(out),
+		styles:      newConsoleStyles(),
+		localizer:   newLocalizer("en"),
+		warnings:    make(map[string]struct{}),
+	}
+}
+
+func colorWriter(writer io.Writer) io.Writer {
+	profileWriter := colorprofile.NewWriter(writer, os.Environ())
+	if supportsColor(writer) && os.Getenv("FORCE_COLOR") != "" && profileWriter.Profile < colorprofile.ANSI {
+		profileWriter.Profile = colorprofile.ANSI
+	}
+	return profileWriter
+}
+
+func enableWindowsANSI(writer io.Writer) {
+	if file, ok := writer.(*os.File); ok {
+		lipgloss.EnableLegacyWindowsANSI(file)
+	}
 }
 
 func (ui *consoleUI) setLocalizer(value localizer) {
@@ -41,13 +97,7 @@ func (ui *consoleUI) text(id messageID, values ...any) string {
 	return ui.localizer.text(id, values...)
 }
 
-func supportsColor(writer io.Writer) bool {
-	if os.Getenv("NO_COLOR") != "" || os.Getenv("CLICOLOR") == "0" || os.Getenv("TERM") == "dumb" {
-		return false
-	}
-	if os.Getenv("FORCE_COLOR") != "" {
-		return true
-	}
+func isInteractiveWriter(writer io.Writer) bool {
 	file, ok := writer.(*os.File)
 	if !ok {
 		return false
@@ -56,11 +106,14 @@ func supportsColor(writer io.Writer) bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
-func (ui *consoleUI) paint(code, value string) string {
-	if !ui.color {
-		return value
+func supportsColor(writer io.Writer) bool {
+	if os.Getenv("NO_COLOR") != "" || os.Getenv("CLICOLOR") == "0" || os.Getenv("TERM") == "dumb" {
+		return false
 	}
-	return "\x1b[" + code + "m" + value + "\x1b[0m"
+	if os.Getenv("FORCE_COLOR") != "" {
+		return true
+	}
+	return isInteractiveWriter(writer)
 }
 
 func (ui *consoleUI) clearStatusLocked() {
@@ -68,9 +121,9 @@ func (ui *consoleUI) clearStatusLocked() {
 		return
 	}
 	if ui.color {
-		fmt.Fprint(ui.out, "\r\x1b[2K")
+		_, _ = fmt.Fprintf(ui.out, "\r%s", ansi.EraseEntireLine)
 	} else {
-		fmt.Fprint(ui.out, "\r")
+		_, _ = fmt.Fprint(ui.out, "\r")
 	}
 	ui.statusSet = false
 }
@@ -79,53 +132,73 @@ func (ui *consoleUI) step(message string) {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
 	ui.clearStatusLocked()
-	fmt.Fprintf(ui.out, "%s %s\n", ui.paint("1;36", "==>"), message)
+	_, _ = fmt.Fprintf(ui.out, "%s %s\n", ui.styles.step.Render("==>"), message)
 }
 
 func (ui *consoleUI) success(message string) {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
 	ui.clearStatusLocked()
-	fmt.Fprintf(ui.out, "%s %s\n", ui.paint("1;32", ui.text(msgStatusOK)), ui.paint("1", message))
+	_, _ = fmt.Fprintf(ui.out, "%s %s\n", ui.styles.success.Render(ui.text(msgStatusOK)), ui.styles.success.Render(message))
 }
 
 func (ui *consoleUI) warning(message string) {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
+	ui.warningLocked(message)
+}
+
+func (ui *consoleUI) warningLocked(message string) {
 	ui.clearStatusLocked()
-	fmt.Fprintf(ui.err, "%s %s\n", ui.paint("1;33", ui.text(msgStatusWarning)), message)
+	_, _ = fmt.Fprintf(ui.out, "%s %s\n", ui.styles.warning.Render(ui.text(msgStatusWarning)), message)
+}
+
+func (ui *consoleUI) warningOnce(key, message string) {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	if _, exists := ui.warnings[key]; exists {
+		return
+	}
+	ui.warnings[key] = struct{}{}
+	ui.warningLocked(message)
+}
+
+func (ui *consoleUI) resetWarning(key string) {
+	ui.mu.Lock()
+	defer ui.mu.Unlock()
+	delete(ui.warnings, key)
 }
 
 func (ui *consoleUI) failure(message string) {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
 	ui.clearStatusLocked()
-	fmt.Fprintf(ui.err, "%s %s\n", ui.paint("1;31", ui.text(msgStatusError)), message)
+	_, _ = fmt.Fprintf(ui.err, "%s %s\n", ui.styles.failure.Render(ui.text(msgStatusError)), message)
 }
 
 func (ui *consoleUI) banner() {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
 	ui.clearStatusLocked()
-	fmt.Fprintln(ui.out, ui.paint("1;36", brandArt))
+	_, _ = fmt.Fprintln(ui.out, ui.styles.brand.Render("NodeLane Tunnel"))
 }
 
 func (ui *consoleUI) detail(label, value string) {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
-	fmt.Fprintf(ui.out, "  %s %s\n", ui.paint("2", fmt.Sprintf("%-10s", label)), ui.paint("1;37", value))
+	_, _ = fmt.Fprintf(ui.out, "  %s %s\n", ui.styles.muted.Render(fmt.Sprintf("%-10s", label)), ui.styles.value.Render(value))
 }
 
 func (ui *consoleUI) highlightedDetail(label, value string) {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
-	fmt.Fprintf(ui.out, "  %s %s\n", ui.paint("1;32", fmt.Sprintf("%-10s", label)), ui.paint("1;32", value))
+	_, _ = fmt.Fprintf(ui.out, "  %s %s\n", ui.styles.public.Render(fmt.Sprintf("%-10s", label)), ui.styles.public.Render(value))
 }
 
 func (ui *consoleUI) instruction(message string) {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
-	fmt.Fprintf(ui.out, "\n%s\n", ui.paint("1;33", message))
+	_, _ = fmt.Fprintf(ui.out, "\n%s\n", ui.styles.warning.Render(message))
 }
 
 func (ui *consoleUI) request(at time.Time, ip, method, address string) {
@@ -135,17 +208,17 @@ func (ui *consoleUI) request(at time.Time, ip, method, address string) {
 	ip = safeConsoleField(ip, 64)
 	method = safeConsoleField(method, 16)
 	address = safeConsoleField(address, 2048)
-	methodColor := "1;34"
+	methodStyle := ui.styles.methodRead
 	switch method {
 	case "POST", "PUT", "PATCH":
-		methodColor = "1;33"
+		methodStyle = ui.styles.methodWrite
 	case "DELETE":
-		methodColor = "1;31"
+		methodStyle = ui.styles.methodDelete
 	}
-	fmt.Fprintf(ui.out, "%s  %s  %s  %s\n",
-		ui.paint("2", at.Local().Format("2006-01-02 15:04:05")),
-		ui.paint("36", fmt.Sprintf("%-39s", ip)),
-		ui.paint(methodColor, fmt.Sprintf("%-7s", method)),
+	_, _ = fmt.Fprintf(ui.out, "%s  %s  %s  %s\n",
+		ui.styles.muted.Render(at.Local().Format("2006-01-02 15:04:05")),
+		ui.styles.step.Render(fmt.Sprintf("%-39s", ip)),
+		methodStyle.Render(fmt.Sprintf("%-7s", method)),
 		address,
 	)
 }
@@ -168,18 +241,22 @@ func (ui *consoleUI) stats(protocol string, snapshot trafficSnapshot) {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
 	line := fmt.Sprintf("%s  %s",
-		ui.paint("1;35", strings.ToUpper(protocol)),
+		ui.styles.protocol.Render(strings.ToUpper(protocol)),
 		ui.text(msgTrafficStats,
-			ui.paint("1;36", strconv.FormatInt(snapshot.ActiveConnections, 10)),
-			ui.paint("36", strconv.FormatInt(snapshot.TotalConnections, 10)),
-			ui.paint("1;33", formatBytes(snapshot.ReceivedBytes)),
-			ui.paint("1;32", formatBytes(snapshot.SentBytes)),
+			ui.styles.step.Render(strconv.FormatInt(snapshot.ActiveConnections, 10)),
+			ui.styles.step.Render(strconv.FormatInt(snapshot.TotalConnections, 10)),
+			ui.styles.warning.Render(formatBytes(snapshot.ReceivedBytes)),
+			ui.styles.success.Render(formatBytes(snapshot.SentBytes)),
 		),
 	)
+	if !ui.interactive {
+		_, _ = fmt.Fprintln(ui.out, line)
+		return
+	}
 	if ui.color {
-		fmt.Fprintf(ui.out, "\r\x1b[2K%s", line)
+		_, _ = fmt.Fprintf(ui.out, "\r%s%s", ansi.EraseEntireLine, line)
 	} else {
-		fmt.Fprintf(ui.out, "\r%s", line)
+		_, _ = fmt.Fprintf(ui.out, "\r%s", line)
 	}
 	ui.statusSet = true
 }
@@ -188,9 +265,31 @@ func (ui *consoleUI) endStats() {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
 	if ui.statusSet {
-		fmt.Fprintln(ui.out)
+		_, _ = fmt.Fprintln(ui.out)
 		ui.statusSet = false
 	}
+}
+
+func nodeLaneFormTheme() huh.Theme {
+	return huh.ThemeFunc(func(isDark bool) *huh.Styles {
+		theme := huh.ThemeBase(isDark)
+		theme.Focused.Title = theme.Focused.Title.Foreground(lipgloss.BrightCyan).Bold(true)
+		theme.Focused.Description = theme.Focused.Description.Foreground(lipgloss.BrightBlack)
+		theme.Focused.SelectSelector = theme.Focused.SelectSelector.Foreground(lipgloss.BrightCyan).Bold(true)
+		theme.Focused.Option = theme.Focused.Option.Foreground(lipgloss.BrightWhite)
+		theme.Focused.TextInput.Cursor = theme.Focused.TextInput.Cursor.Foreground(lipgloss.BrightCyan)
+		theme.Focused.TextInput.Prompt = theme.Focused.TextInput.Prompt.Foreground(lipgloss.BrightCyan)
+		theme.Focused.TextInput.Placeholder = theme.Focused.TextInput.Placeholder.Foreground(lipgloss.BrightBlack)
+		theme.Focused.ErrorIndicator = theme.Focused.ErrorIndicator.Foreground(lipgloss.BrightRed)
+		theme.Focused.ErrorMessage = theme.Focused.ErrorMessage.Foreground(lipgloss.BrightRed)
+		theme.Blurred = theme.Focused
+		theme.Blurred.Base = theme.Blurred.Base.BorderStyle(lipgloss.HiddenBorder())
+		theme.Blurred.Title = theme.Blurred.Title.Foreground(lipgloss.BrightBlack).Bold(false)
+		theme.Blurred.TextInput.Text = theme.Blurred.TextInput.Text.Foreground(lipgloss.BrightGreen)
+		theme.Help.ShortKey = theme.Help.ShortKey.Foreground(lipgloss.BrightBlack)
+		theme.Help.ShortDesc = theme.Help.ShortDesc.Foreground(lipgloss.BrightBlack)
+		return theme
+	})
 }
 
 func formatBytes(value uint64) string {
