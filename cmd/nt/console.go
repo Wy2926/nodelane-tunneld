@@ -306,15 +306,25 @@ func formatBytes(value uint64) string {
 }
 
 func openInteractiveInput(ui *consoleUI) (io.Reader, func(), error) {
+	stdinIsTerminal := false
+	if info, err := os.Stdin.Stat(); err == nil {
+		stdinIsTerminal = info.Mode()&os.ModeCharDevice != 0
+	}
 	device := "/dev/tty"
 	if runtime.GOOS == "windows" {
 		device = "CONIN$"
 	}
-	if file, err := os.Open(device); err == nil {
-		return file, func() { _ = file.Close() }, nil
+	return selectInteractiveInput(ui, os.Stdin, stdinIsTerminal, func() (io.ReadCloser, error) {
+		return os.Open(device)
+	})
+}
+
+func selectInteractiveInput(ui *consoleUI, stdin io.Reader, stdinIsTerminal bool, openConsole func() (io.ReadCloser, error)) (io.Reader, func(), error) {
+	if stdinIsTerminal {
+		return stdin, func() {}, nil
 	}
-	if info, err := os.Stdin.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
-		return os.Stdin, func() {}, nil
+	if console, err := openConsole(); err == nil {
+		return console, func() { _ = console.Close() }, nil
 	}
 	return nil, func() {}, errors.New(ui.text(msgNoInteractiveInput))
 }

@@ -2,12 +2,66 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
 
 	"charm.land/lipgloss/v2"
 )
+
+func TestInteractiveInputPrefersUsableStdinBeforeOpeningConsoleDevice(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	stdin := strings.NewReader("stdin")
+	opened := false
+	input, closeInput, err := selectInteractiveInput(
+		newConsoleUI(&bytes.Buffer{}, &bytes.Buffer{}),
+		stdin,
+		true,
+		func() (io.ReadCloser, error) {
+			opened = true
+			return io.NopCloser(strings.NewReader("console")), nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeInput()
+	if opened {
+		t.Fatal("console device opened even though stdin is an interactive terminal")
+	}
+	if input != stdin {
+		t.Fatal("interactive input did not preserve the usable stdin reader")
+	}
+}
+
+func TestInteractiveInputFallsBackToConsoleDeviceForPipedStdin(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	opened := false
+	input, closeInput, err := selectInteractiveInput(
+		newConsoleUI(&bytes.Buffer{}, &bytes.Buffer{}),
+		strings.NewReader("pipe"),
+		false,
+		func() (io.ReadCloser, error) {
+			opened = true
+			return io.NopCloser(strings.NewReader("console")), nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeInput()
+	if !opened {
+		t.Fatal("console device was not opened for redirected stdin")
+	}
+	contents, err := io.ReadAll(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "console" {
+		t.Fatalf("interactive input = %q, want console device", contents)
+	}
+}
 
 func TestConsoleRoutesHumanWarningsToStdoutAndFailuresToStderr(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
