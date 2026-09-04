@@ -248,6 +248,3 @@ Get-ChildItem -LiteralPath $versionsDir -Directory | ForEach-Object {
 }
 
 & $ntExe @TunnelArguments
-if ($LASTEXITCODE -ne 0) {
-    throw "NodeLane Tunnel exited with code $LASTEXITCODE."
-}

@@ -13,21 +13,24 @@ HTTP tunnels: `http://<slug>.tunnel.nodelane.net`
 Linux:
 
 ```sh
-export PATH="$HOME/.local/bin:$PATH"; curl -fsSL https://tunnel.nodelane.net/run.sh | sh
+curl -fsSL https://tunnel.nodelane.net/run.sh | sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-& ([scriptblock]::Create((irm 'https://tunnel.nodelane.net/run.ps1')))
+irm https://tunnel.nodelane.net/run.ps1 | iex
 ```
 
-The bootstrap installs the `nt` command and starts it. With no arguments the
-client asks for the protocol, local address, and local port; press Enter at the
-address prompt to select `localhost`. Arguments can still be supplied for
-non-interactive use: append `-s -- http localhost 3000` to the Linux command,
-or `http localhost 3000` to the PowerShell command. Supplying only the protocol
-prompts for the port; supplying only a port prompts for the protocol.
+Windows CMD:
+
+```bat
+curl -fsSL https://tunnel.nodelane.net/run.cmd | cmd
+```
+
+The bootstrap installs the `nt` command and opens an interactive form. Use the
+arrow keys to choose HTTP, TCP, or UDP. An empty host uses `localhost`; the port
+defaults to `3000` and is validated immediately against the `1–65535` range.
 
 After the first run, start another tunnel directly:
 
@@ -35,11 +38,14 @@ After the first run, start another tunnel directly:
 nt http localhost 3000
 ```
 
-On Windows the bootstrap adds the command directory to both the user PATH and
-the current PowerShell session. The Linux command adds `~/.local/bin` to the
-current shell's PATH, while the bootstrap persists the same setting in the
-shell startup file. Both platforms can therefore use `nt` immediately and in
-new terminals.
+The direct command accepts `protocol host port` for non-interactive use. If any
+value is missing, `nt` opens the same form with supplied values prefilled and
+editable.
+
+On Windows, both installers persist the command directory in the user PATH;
+PowerShell also updates the current session. Linux persists `~/.local/bin` in
+the shell startup file. Every bootstrap launches the installed executable
+directly, so the first tunnel works without reopening the terminal.
 
 The bootstrap shows a package download progress bar, verifies the SHA-256
 checksum and embedded version, and then atomically points the `nt` launcher at

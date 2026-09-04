@@ -78,6 +78,29 @@ func TestCatalogsContainEveryEnglishMessage(t *testing.T) {
 	}
 }
 
+func TestEveryTranslationLocalizesInteractiveFormHelp(t *testing.T) {
+	translations := map[string]map[messageID]string{
+		"zh-CN": catalogZhCN,
+		"zh-TW": catalogZhTW,
+		"es":    catalogES,
+		"fr":    catalogFR,
+		"de":    catalogDE,
+		"ja":    catalogJA,
+		"ko":    catalogKO,
+		"pt-BR": catalogPtBR,
+		"ru":    catalogRU,
+		"ar":    catalogAR,
+		"hi":    catalogHI,
+	}
+	for locale, catalog := range translations {
+		for _, id := range []messageID{msgProtocolNavigation, msgLocalAddressDefaultHelp, msgPortRangeHelp} {
+			if strings.TrimSpace(catalog[id]) == "" {
+				t.Errorf("locale %s does not translate %s", locale, id)
+			}
+		}
+	}
+}
+
 func formatSignature(value string) string {
 	return strings.Join(formatDirectivePattern.FindAllString(value, -1), " ")
 }

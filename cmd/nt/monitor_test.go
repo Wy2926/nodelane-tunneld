@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -63,6 +65,82 @@ func TestHTTPMonitorForwardsAndLogsRequest(t *testing.T) {
 		if !strings.Contains(logLine, value) {
 			t.Errorf("request log %q does not contain %q", logLine, value)
 		}
+	}
+}
+
+func TestExpectedForwardingErrorRecognizesNormalShutdown(t *testing.T) {
+	for _, err := range []error{context.Canceled, net.ErrClosed, http.ErrServerClosed} {
+		if !expectedForwardingError(err) {
+			t.Errorf("expectedForwardingError(%v) = false", err)
+		}
+	}
+	if expectedForwardingError(errors.New("connection refused")) {
+		t.Fatal("connection refusal was treated as normal shutdown")
+	}
+}
+
+func TestHTTPMonitorDeduplicatesFailuresUntilServiceRecovers(t *testing.T) {
+	var fail atomic.Bool
+	fail.Store(true)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		if fail.Load() {
+			hijacker, ok := writer.(http.Hijacker)
+			if !ok {
+				t.Error("upstream response writer cannot hijack")
+				return
+			}
+			connection, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			_ = connection.Close()
+			return
+		}
+		_, _ = io.WriteString(writer, "ok")
+	}))
+	defer upstream.Close()
+	upstreamHost, upstreamPort, err := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, _ := strconv.Atoi(upstreamPort)
+
+	var output bytes.Buffer
+	ui := newConsoleUI(&output, &bytes.Buffer{})
+	ctx, cancel := context.WithCancel(context.Background())
+	monitor, err := startHTTPMonitor(ctx, upstreamHost, port, ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		cancel()
+		_ = monitor.Close()
+	}()
+
+	request := func(wantStatus int) {
+		t.Helper()
+		response, requestErr := http.Get("http://127.0.0.1:" + strconv.Itoa(monitor.port) + "/health")
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != wantStatus {
+			t.Fatalf("status = %d, want %d", response.StatusCode, wantStatus)
+		}
+	}
+
+	request(http.StatusBadGateway)
+	request(http.StatusBadGateway)
+	if got := strings.Count(output.String(), "WARN"); got != 1 {
+		t.Fatalf("warnings before recovery = %d, want 1; output: %q", got, output.String())
+	}
+	fail.Store(false)
+	request(http.StatusOK)
+	fail.Store(true)
+	request(http.StatusBadGateway)
+	if got := strings.Count(output.String(), "WARN"); got != 2 {
+		t.Fatalf("warnings after recovery = %d, want 2; output: %q", got, output.String())
 	}
 }
 

@@ -23,6 +23,18 @@ type trafficSnapshot struct {
 	SentBytes         uint64
 }
 
+func expectedForwardingError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) || errors.Is(err, http.ErrServerClosed)
+}
+
+const httpUpstreamWarning = "http-upstream"
+
+type forwardingRequestState struct {
+	failed bool
+}
+
+type forwardingRequestStateKey struct{}
+
 type trafficCounters struct {
 	active   atomic.Int64
 	total    atomic.Int64
@@ -87,13 +99,23 @@ func startHTTPMonitor(ctx context.Context, targetHost string, targetPort int, ui
 		}
 	}}
 	proxy.ErrorHandler = func(writer http.ResponseWriter, request *http.Request, proxyErr error) {
-		ui.warning(ui.text(msgHTTPServiceUnavailable, proxyErr))
+		if state, ok := request.Context().Value(forwardingRequestStateKey{}).(*forwardingRequestState); ok {
+			state.failed = true
+		}
+		if !expectedForwardingError(proxyErr) {
+			ui.warningOnce(httpUpstreamWarning, ui.text(msgHTTPServiceUnavailable, proxyErr))
+		}
 		http.Error(writer, ui.text(msgHTTPServiceUnavailableBody), http.StatusBadGateway)
 	}
 	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		address := request.Host + request.URL.RequestURI()
 		ui.request(time.Now(), requestIP(request), request.Method, address)
+		state := &forwardingRequestState{}
+		request = request.WithContext(context.WithValue(request.Context(), forwardingRequestStateKey{}, state))
 		proxy.ServeHTTP(writer, request)
+		if !state.failed {
+			ui.resetWarning(httpUpstreamWarning)
+		}
 	})
 	server := &http.Server{
 		Handler:           handler,
