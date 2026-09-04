@@ -52,6 +52,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /internal/admin/clients/{id}/ban", s.internalOnly(http.HandlerFunc(s.banClient)))
 	mux.HandleFunc("GET /run.sh", s.runScript)
 	mux.HandleFunc("GET /run.ps1", s.runScript)
+	mux.HandleFunc("GET /run.cmd", s.runScript)
+	mux.HandleFunc("GET /install.cmd", s.runScript)
 	if s.cfg.ReleaseDir != "" {
 		files := http.StripPrefix("/releases/", http.FileServer(http.Dir(s.cfg.ReleaseDir)))
 		mux.Handle("GET /releases/", files)
@@ -490,6 +492,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Cache-Control", "no-store")
 		if r.URL.Path == "/healthz" || r.URL.Path == "/run.sh" || r.URL.Path == "/run.ps1" ||
+			r.URL.Path == "/run.cmd" || r.URL.Path == "/install.cmd" ||
 			strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/internal/") ||
 			strings.HasPrefix(r.URL.Path, "/releases/") {
 			w.Header().Set("X-Robots-Tag", "noindex, nofollow")
@@ -542,6 +545,12 @@ func (s *Server) runScript(w http.ResponseWriter, r *http.Request) {
 	contentType := "text/x-shellscript; charset=utf-8"
 	if r.URL.Path == "/run.ps1" {
 		name = "assets/run.ps1"
+		contentType = "text/plain; charset=utf-8"
+	} else if r.URL.Path == "/run.cmd" {
+		name = "assets/run.cmd"
+		contentType = "text/plain; charset=utf-8"
+	} else if r.URL.Path == "/install.cmd" {
+		name = "assets/install.cmd"
 		contentType = "text/plain; charset=utf-8"
 	}
 	data, err := publicAssets.ReadFile(name)

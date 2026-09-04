@@ -110,7 +110,7 @@ curl -fsSL https://tunnel.nodelane.net/run.cmd | cmd
 
 `run.cmd` is a short, linear, pipe-safe bootstrap. It uses only CMD and Windows inbox executables to download a full batch installer into `%TEMP%`, call it, preserve its exit code, and clean up. The full CMD installer uses `curl.exe`, `tar.exe`, and a Windows system hashing command; it never invokes PowerShell. The supported CMD baseline is a mainstream Windows 10/11 installation that includes `curl.exe` and `tar.exe`.
 
-The PowerShell installer must not `throw` when the client exits nonzero. It exits with the same code after the CLI has already rendered the error.
+The PowerShell installer must not `throw` or call `exit` when the client exits nonzero. The native invocation leaves its code in `$LASTEXITCODE` after the CLI renders the error without terminating the user's current PowerShell session.
 
 ## Website and Documentation
 

@@ -195,7 +195,7 @@ exit /b %NT_EXIT%
 
 - [ ] **Step 4: Implement `install.cmd`.** Detect AMD64/ARM64; install below `%LOCALAPPDATA%\nodelane`; fetch `stable.txt`; download `nt_<version>_windows_<arch>.zip`; compare the `.sha256` token with `certutil -hashfile`; extract with `tar.exe`; verify `nt.exe --version`; atomically update `current`; write the forwarding `nt.cmd`; update `HKCU\Environment\Path` without duplication; keep the prior version; invoke the client with `%*`. All failures use one `:fail` block and a nonzero exit, never PowerShell.
 
-- [ ] **Step 5: Replace PowerShell's final client `throw` with capture of `$LASTEXITCODE` followed by `exit $clientExitCode`.** Installation failures remain terminating.
+- [ ] **Step 5: Remove PowerShell's final client `throw` and leave the native invocation as the last statement.** It preserves `$LASTEXITCODE` without calling `exit`, which would terminate a user's current IEX host. Installation failures remain terminating.
 
 - [ ] **Step 6: Register both GET routes, map embedded filenames/MIME, and include both in the no-index header condition.**
 
