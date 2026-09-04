@@ -5,10 +5,12 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/term"
 )
 
 func TestColorWriterPreservesTerminalFileContract(t *testing.T) {
@@ -22,6 +24,28 @@ func TestColorWriterPreservesTerminalFileContract(t *testing.T) {
 	}
 	if got, want := file.Fd(), os.Stdout.Fd(); got != want {
 		t.Fatalf("color writer descriptor = %d, want %d", got, want)
+	}
+}
+
+func TestWindowsFallbackConsoleInputSupportsRawMode(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("requires the Windows console device")
+	}
+	input, err := openConsoleDevice()
+	if err != nil {
+		t.Skipf("console device unavailable: %v", err)
+	}
+	defer input.Close()
+	file, ok := input.(interface{ Fd() uintptr })
+	if !ok {
+		t.Fatal("console input does not expose its Windows handle")
+	}
+	state, err := term.MakeRaw(file.Fd())
+	if err != nil {
+		t.Fatalf("fallback console input cannot enter raw mode: %v", err)
+	}
+	if err := term.Restore(file.Fd(), state); err != nil {
+		t.Fatalf("restore console mode: %v", err)
 	}
 }
 

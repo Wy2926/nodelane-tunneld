@@ -335,13 +335,15 @@ func openInteractiveInput(ui *consoleUI) (io.Reader, func(), error) {
 	if info, err := os.Stdin.Stat(); err == nil {
 		stdinIsTerminal = info.Mode()&os.ModeCharDevice != 0
 	}
+	return selectInteractiveInput(ui, os.Stdin, stdinIsTerminal, openConsoleDevice)
+}
+
+func openConsoleDevice() (io.ReadCloser, error) {
 	device := "/dev/tty"
 	if runtime.GOOS == "windows" {
 		device = "CONIN$"
 	}
-	return selectInteractiveInput(ui, os.Stdin, stdinIsTerminal, func() (io.ReadCloser, error) {
-		return os.Open(device)
-	})
+	return os.OpenFile(device, os.O_RDWR, 0)
 }
 
 func selectInteractiveInput(ui *consoleUI, stdin io.Reader, stdinIsTerminal bool, openConsole func() (io.ReadCloser, error)) (io.Reader, func(), error) {
