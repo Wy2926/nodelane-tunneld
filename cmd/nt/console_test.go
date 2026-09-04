@@ -78,3 +78,19 @@ func TestConsoleRedirectedStatsUseStableLines(t *testing.T) {
 		t.Fatalf("stats lines = %d, want 2; output: %q", got, stdout.String())
 	}
 }
+
+func TestWarningGateSuppressesDuplicatesUntilReset(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	var stdout bytes.Buffer
+	ui := newConsoleUI(&stdout, &bytes.Buffer{})
+	ui.warningOnce("http-upstream", "offline")
+	ui.warningOnce("http-upstream", "offline again")
+	if got := strings.Count(stdout.String(), "WARN"); got != 1 {
+		t.Fatalf("warning count = %d, want 1; output: %q", got, stdout.String())
+	}
+	ui.resetWarning("http-upstream")
+	ui.warningOnce("http-upstream", "offline later")
+	if got := strings.Count(stdout.String(), "WARN"); got != 2 {
+		t.Fatalf("warning count after reset = %d, want 2; output: %q", got, stdout.String())
+	}
+}
