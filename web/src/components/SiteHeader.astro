@@ -1,0 +1,82 @@
+---
+import {
+  getLocalePath,
+  localeDefinitions,
+  type Locale,
+  type Translation,
+} from "../i18n";
+
+interface Props {
+  locale: Locale;
+  copy: Translation;
+}
+
+const { locale, copy } = Astro.props;
+const home = getLocalePath(locale);
+---
+
+<header class="site-header">
+  <div class="header-inner shell">
+    <a class="brand-lockup" href={`${home}#start`} title={copy.brandHome} translate="no">
+      <img class="brand-mark" src="/nodelane-mark-96.png" width="96" height="96" alt="" />
+      <span class="brand-name">NodeLane</span>
+      <span class="brand-product" aria-current="page">Tunnel</span>
+    </a>
+
+    <nav class="main-nav" aria-label={copy.navLabel}>
+      <a class="active" href="#start" data-section-link="start">{copy.nav.start}</a>
+      <a href="#protocols" data-section-link="protocols">{copy.nav.protocols}</a>
+      <a href="#access" data-section-link="access">{copy.nav.access}</a>
+    </nav>
+
+    <div class="header-actions">
+      <label class="language-switch" data-language-switch>
+        <span class="visually-hidden">{copy.languageLabel}</span>
+        <svg class="language-icon" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+          <circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" stroke-width="1.25"></circle>
+          <path d="M2 8h12M8 1.75c1.7 1.7 2.55 3.78 2.55 6.25S9.7 12.55 8 14.25C6.3 12.55 5.45 10.47 5.45 8S6.3 3.45 8 1.75Z" fill="none" stroke="currentColor" stroke-width="1.1"></path>
+        </svg>
+        <select data-language-select aria-label={copy.languageLabel} lang={locale}>
+          {localeDefinitions.map((definition) => (
+            <option
+              value={definition.code}
+              data-path={getLocalePath(definition.code)}
+              lang={definition.code}
+              dir={definition.direction}
+              selected={definition.code === locale}
+            >
+              {definition.nativeName}
+            </option>
+          ))}
+        </select>
+        <svg class="language-chevron" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+          <path d="m2 3.5 3 3 3-3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"></path>
+        </svg>
+      </label>
+      <a class="site-link" href="https://www.nodelane.net/" aria-label={copy.mainSiteLabel}>
+        <span>{copy.mainSite}</span>
+        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+          <path d="M3 9 9 3M4 3h5v5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"></path>
+        </svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<script>
+  document.querySelectorAll<HTMLElement>("[data-language-switch]").forEach((root) => {
+    const select = root.querySelector<HTMLSelectElement>("[data-language-select]");
+    if (!select) return;
+
+    select.addEventListener("change", () => {
+      const option = select.selectedOptions[0];
+      const path = option?.dataset.path;
+      if (!path) return;
+
+      const target = new URL(path, window.location.origin);
+      target.search = window.location.search;
+      target.hash = window.location.hash;
+      window.location.assign(target);
+    });
+  });
+</script>

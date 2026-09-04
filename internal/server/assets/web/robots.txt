@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /internal/
+Sitemap: https://tunnel.nodelane.net/sitemap.xml

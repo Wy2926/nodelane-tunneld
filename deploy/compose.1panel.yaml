@@ -1,0 +1,19 @@
+services:
+  tunneld:
+    container_name: nodelane-tunneld
+    image: docker.nodelane.net/nodelane/tunneld:0.3.0
+    pull_policy: always
+    restart: unless-stopped
+    init: true
+    read_only: true
+    network_mode: host
+    env_file:
+      - /opt/nodelane/tunnel/.env
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    stop_grace_period: 15s

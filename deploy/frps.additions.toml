@@ -1,0 +1,38 @@
+# Manual merge template only. No project script applies this file or changes
+# the existing frps container. Do not duplicate keys already present.
+# FRP_SERVER_PORT and FRP_AUTH_TOKEN in tunneld must match.
+
+# Existing control listener; keep the deployed value when it differs.
+bindPort = 7000
+
+# 1Panel/OpenResty forwards wildcard HTTP traffic here. Keep this port private
+# in the firewall/security group and preserve the original Host header.
+vhostHTTPPort = 8080
+subDomainHost = "tunnel.nodelane.net"
+
+# These ranges must match tunneld's TCP_PORT_* and UDP_PORT_* settings.
+# If allowPorts already exists, merge the ranges rather than replacing it.
+allowPorts = [
+  { start = 20000, end = 39999 }
+]
+
+maxPortsPerClient = 1
+detailedErrorsToClient = false
+
+auth.method = "token"
+auth.token = "REPLACE_WITH_EXISTING_FRPS_TOKEN"
+auth.additionalScopes = ["HeartBeats", "NewWorkConns"]
+
+# frp 0.70 enables encrypted TLS transport by default and can generate its own
+# transport certificate. Public HTTPS remains terminated by OpenResty/1Panel.
+transport.tls.force = true
+transport.tcpMux = true
+transport.tcpMuxKeepaliveInterval = 30
+
+# The stilleshan/frps container must use --network host. In bridge mode,
+# 127.0.0.1 below points back into the frps container instead of tunneld.
+[[httpPlugins]]
+name = "nodelane-tunnel"
+addr = "127.0.0.1:9000"
+path = "/internal/frp"
+ops = ["Login", "NewProxy", "CloseProxy", "Ping", "NewWorkConn", "NewUserConn"]

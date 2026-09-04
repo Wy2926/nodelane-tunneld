@@ -1,0 +1,8 @@
+---
+import TunnelPage from "../components/TunnelPage.astro";
+import { defaultLocale, getTranslation } from "../i18n";
+
+const locale = defaultLocale;
+---
+
+<TunnelPage locale={locale} copy={getTranslation(locale)} />

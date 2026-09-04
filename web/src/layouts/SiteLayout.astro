@@ -1,0 +1,126 @@
+---
+import {
+  getLocaleDefinition,
+  getLocalePath,
+  localeDefinitions,
+  type Locale,
+  type Translation,
+} from "../i18n";
+import "../styles/design-system.css";
+import "../styles/tunnel.css";
+
+interface Props {
+  locale: Locale;
+  copy: Translation;
+}
+
+const { locale, copy } = Astro.props;
+const localeDefinition = getLocaleDefinition(locale);
+const canonicalPath = getLocalePath(locale);
+const canonical = new URL(canonicalPath, Astro.site);
+const siteUrl = new URL("/", Astro.site);
+const organizationUrl = new URL("https://www.nodelane.net/");
+const logo = new URL("/nodelane-mark.png", Astro.site);
+const shareImage = new URL("/nodelane-tunnel-og.png", Astro.site);
+const organizationId = `${organizationUrl.toString()}#organization`;
+const websiteId = `${siteUrl.toString()}#website`;
+const webPageId = `${canonical.toString()}#webpage`;
+const serviceId = `${canonical.toString()}#service`;
+const structuredData = {
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Organization",
+      "@id": organizationId,
+      name: "NodeLane",
+      url: organizationUrl.toString(),
+      logo: {
+        "@type": "ImageObject",
+        url: logo.toString(),
+        width: 1254,
+        height: 1254,
+      },
+    },
+    {
+      "@type": "WebSite",
+      "@id": websiteId,
+      url: siteUrl.toString(),
+      name: "NodeLane Tunnel",
+      alternateName: ["NodeLane", "tunnel.nodelane.net"],
+      publisher: { "@id": organizationId },
+    },
+    {
+      "@type": "WebPage",
+      "@id": webPageId,
+      url: canonical.toString(),
+      name: copy.meta.title,
+      description: copy.meta.description,
+      inLanguage: locale,
+      isPartOf: { "@id": websiteId },
+      mainEntity: { "@id": serviceId },
+    },
+    {
+      "@type": "Service",
+      "@id": serviceId,
+      name: "NodeLane Tunnel",
+      url: canonical.toString(),
+      description: copy.meta.description,
+      serviceType: copy.protocols.title,
+      provider: { "@id": organizationId },
+      availableChannel: {
+        "@type": "ServiceChannel",
+        serviceUrl: canonical.toString(),
+        availableLanguage: locale,
+      },
+    },
+  ],
+};
+const serializedStructuredData = JSON.stringify(structuredData).replaceAll("<", "\\u003c");
+---
+
+<!doctype html>
+<html lang={locale} dir={localeDefinition.direction}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#071018" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="description" content={copy.meta.description} />
+    <meta
+      name="robots"
+      content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"
+    />
+    <link rel="canonical" href={canonical} />
+    {localeDefinitions.map(({ code }) => (
+      <link rel="alternate" hreflang={code} href={new URL(getLocalePath(code), Astro.site)} />
+    ))}
+    <link rel="alternate" hreflang="x-default" href={new URL("/", Astro.site)} />
+    <link rel="icon" type="image/png" sizes="192x192" href="/nodelane-mark-192.png" />
+    <link rel="apple-touch-icon" sizes="192x192" href="/nodelane-mark-192.png" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="NodeLane Tunnel" />
+    <meta property="og:title" content={copy.meta.title} />
+    <meta property="og:description" content={copy.meta.description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={shareImage} />
+    <meta property="og:image:secure_url" content={shareImage} />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1731" />
+    <meta property="og:image:height" content="909" />
+    <meta property="og:image:alt" content={copy.meta.title} />
+    <meta property="og:locale" content={localeDefinition.ogLocale} />
+    {localeDefinitions.filter(({ code }) => code !== locale).map(({ ogLocale }) => (
+      <meta property="og:locale:alternate" content={ogLocale} />
+    ))}
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={copy.meta.title} />
+    <meta name="twitter:description" content={copy.meta.description} />
+    <meta name="twitter:image" content={shareImage} />
+    <meta name="twitter:image:alt" content={copy.meta.title} />
+    <title>{copy.meta.title}</title>
+    <script type="application/ld+json" set:html={serializedStructuredData} is:inline />
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>

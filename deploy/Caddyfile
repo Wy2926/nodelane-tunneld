@@ -1,0 +1,46 @@
+# This example assumes Caddy, frps, and the compose stack run on the same host.
+# The control site stays on HTTPS while wildcard tunnel traffic uses HTTP.
+
+https://tunnel.nodelane.net {
+    encode zstd gzip
+
+    handle /api/* {
+        reverse_proxy 127.0.0.1:9000 {
+            header_up X-Real-IP {remote_host}
+        }
+    }
+
+    handle /run.sh {
+        reverse_proxy 127.0.0.1:9000 {
+            header_up X-Real-IP {remote_host}
+        }
+    }
+
+    handle /run.ps1 {
+        reverse_proxy 127.0.0.1:9000 {
+            header_up X-Real-IP {remote_host}
+        }
+    }
+
+    handle /releases/* {
+        root * /srv/nodelane/tunnel
+        file_server
+    }
+
+    handle /internal/* {
+        respond 404
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:9000 {
+            header_up X-Real-IP {remote_host}
+        }
+    }
+}
+
+http://*.tunnel.nodelane.net {
+    reverse_proxy 127.0.0.1:8080
+}
+
+# To enable HTTPS tunnels later, remove the http:// prefix above, configure a
+# wildcard certificate (normally through DNS-01), and set PUBLIC_SCHEME=https.

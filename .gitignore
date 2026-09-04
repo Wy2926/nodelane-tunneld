@@ -1,0 +1,10 @@
+.env
+.cache/
+bin/
+dist/
+coverage.out
+web/node_modules/
+web/.astro/
+web/dist/
+*.log
+*.exe

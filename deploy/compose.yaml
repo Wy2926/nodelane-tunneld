@@ -1,0 +1,18 @@
+services:
+  tunneld:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Production target is Linux. Host networking preserves the loopback
+    # trust boundary between Caddy/frps and tunneld.
+    network_mode: host
+    env_file:
+      - ../.env
+    volumes:
+      - /srv/nodelane/tunnel/releases:/releases:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

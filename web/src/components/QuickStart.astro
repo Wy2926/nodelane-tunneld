@@ -1,0 +1,171 @@
+---
+import type { Translation } from "../i18n";
+
+interface Props {
+  copy: Translation["quickstart"];
+}
+
+const { copy } = Astro.props;
+---
+
+<section
+  class="quickstart"
+  aria-label={copy.ariaLabel}
+  data-command-builder
+  data-copy-label={copy.copy}
+  data-copied-label={copy.copied}
+  data-selected-label={copy.selected}
+  data-forwarding-template={copy.forwarding}
+  data-http-label={copy.publicLabels.http}
+  data-tcp-label={copy.publicLabels.tcp}
+  data-udp-label={copy.publicLabels.udp}
+>
+  <div class="quickstart-head">
+    <div class="quickstart-title">
+      <strong>{copy.title}</strong>
+      <span>{copy.subtitle}</span>
+    </div>
+    <div class="control-groups">
+      <div class="control-group" aria-label={copy.osLabel}>
+        <button class="active" type="button" data-os="linux" aria-pressed="true">Linux</button>
+        <button type="button" data-os="windows" aria-pressed="false">Windows</button>
+      </div>
+      <div class="control-group" aria-label={copy.protocolLabel}>
+        <button class="active" type="button" data-protocol="http" aria-pressed="true">HTTP</button>
+        <button type="button" data-protocol="tcp" aria-pressed="false">TCP</button>
+        <button type="button" data-protocol="udp" aria-pressed="false">UDP</button>
+      </div>
+    </div>
+  </div>
+  <div class="command-wrap">
+    <div class="command">
+      <span class="prompt" data-prompt aria-hidden="true">$</span>
+      <pre><code data-command>export PATH="$HOME/.local/bin:$PATH"; curl -fsSL https://tunnel.nodelane.net/run.sh | sh -s -- http localhost 3000</code></pre>
+      <button class="copy" data-copy type="button" aria-live="polite">{copy.copy}</button>
+    </div>
+    <div class="quickstart-note">
+      <code data-forwarding>localhost:3000 → {copy.publicLabels.http}</code>
+      <span>{copy.anonymous}</span>
+    </div>
+  </div>
+</section>
+
+<script>
+  type OperatingSystem = "linux" | "windows";
+  type Protocol = "http" | "tcp" | "udp";
+
+  const ports: Record<Protocol, number> = { http: 3000, tcp: 22, udp: 5353 };
+
+  function commandFor(os: OperatingSystem, protocol: Protocol): string {
+    const suffix = `${protocol} localhost ${ports[protocol]}`;
+    if (os === "windows") {
+      return `& ([scriptblock]::Create((irm 'https://tunnel.nodelane.net/run.ps1'))) ${suffix}`;
+    }
+    return `export PATH="$HOME/.local/bin:$PATH"; curl -fsSL https://tunnel.nodelane.net/run.sh | sh -s -- ${suffix}`;
+  }
+
+  function selectPlainText(text: string): { copied: boolean; cleanup: () => void } {
+    const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.readOnly = true;
+    textarea.tabIndex = -1;
+    textarea.setAttribute("aria-hidden", "true");
+    textarea.style.cssText = "position:fixed;inset-block-start:0;inset-inline-start:-10000px;width:1px;height:1px;opacity:0;pointer-events:none";
+    document.body.append(textarea);
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+
+    let copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } catch {
+      // Keep the plain-text textarea selected so a manual copy cannot include rich HTML.
+    }
+
+    return {
+      copied,
+      cleanup: () => {
+        textarea.remove();
+        activeElement?.focus();
+      },
+    };
+  }
+
+  async function copyPlainText(text: string): Promise<{ copied: boolean; cleanup?: () => void }> {
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return { copied: true };
+      } catch {
+        // Clipboard permission can be denied; use a text-only legacy fallback.
+      }
+    }
+
+    return selectPlainText(text);
+  }
+
+  function initializeCommandBuilder(root: HTMLElement): void {
+    const command = root.querySelector<HTMLElement>("[data-command]");
+    const forwarding = root.querySelector<HTMLElement>("[data-forwarding]");
+    const prompt = root.querySelector<HTMLElement>("[data-prompt]");
+    const copyButton = root.querySelector<HTMLButtonElement>("[data-copy]");
+    if (!command || !forwarding || !prompt || !copyButton) return;
+
+    const state: { os: OperatingSystem; protocol: Protocol } = {
+      os: /Windows/i.test(navigator.userAgent) ? "windows" : "linux",
+      protocol: "http",
+    };
+
+    const setPressed = (selector: string, value: string): void => {
+      root.querySelectorAll<HTMLButtonElement>(selector).forEach((button) => {
+        const active = button.dataset.os === value || button.dataset.protocol === value;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-pressed", String(active));
+      });
+    };
+
+    const render = (): void => {
+      command.textContent = commandFor(state.os, state.protocol);
+      prompt.textContent = state.os === "windows" ? "PS>" : "$";
+      const label = root.dataset[`${state.protocol}Label`] ?? state.protocol.toUpperCase();
+      forwarding.textContent = (root.dataset.forwardingTemplate ?? "localhost:{port} → {protocol}")
+        .replace("{port}", String(ports[state.protocol]))
+        .replace("{protocol}", label);
+      setPressed("[data-os]", state.os);
+      setPressed("[data-protocol]", state.protocol);
+    };
+
+    root.querySelectorAll<HTMLButtonElement>("[data-os]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.os = button.dataset.os as OperatingSystem;
+        render();
+      });
+    });
+
+    root.querySelectorAll<HTMLButtonElement>("[data-protocol]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.protocol = button.dataset.protocol as Protocol;
+        render();
+      });
+    });
+
+    copyButton.addEventListener("click", async () => {
+      const text = commandFor(state.os, state.protocol);
+      const result = await copyPlainText(text);
+      const status = result.copied
+        ? root.dataset.copiedLabel ?? "Copied"
+        : root.dataset.selectedLabel ?? "Selected";
+      if (result.copied) result.cleanup?.();
+      copyButton.textContent = status;
+      window.setTimeout(() => {
+        if (!result.copied) result.cleanup?.();
+        copyButton.textContent = root.dataset.copyLabel ?? "Copy";
+      }, 1400);
+    });
+
+    render();
+  }
+
+  document.querySelectorAll<HTMLElement>("[data-command-builder]").forEach(initializeCommandBuilder);
+</script>

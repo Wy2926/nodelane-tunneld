@@ -1,0 +1,27 @@
+---
+import type { Translation } from "../i18n";
+
+interface Props {
+  copy: Translation["footer"];
+}
+
+const { copy } = Astro.props;
+---
+
+<footer class="site-footer">
+  <div class="footer-inner shell">
+    <div class="footer-brand">
+      <img
+        class="brand-mark"
+        src="/nodelane-mark-96.png"
+        width="96"
+        height="96"
+        loading="lazy"
+        alt=""
+      />
+      <strong>NodeLane Tunnel</strong>
+    </div>
+    <span class="footer-slogan">{copy.slogan}</span>
+    <a class="footer-top" href="#main">{copy.backToTop}</a>
+  </div>
+</footer>

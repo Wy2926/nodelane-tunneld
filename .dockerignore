@@ -1,0 +1,11 @@
+.git
+.github
+.env
+bin
+dist
+web/node_modules
+web/.astro
+web/dist
+internal/server/assets/web
+*.exe
+*.log

@@ -1,0 +1,151 @@
+---
+import type { Locale, Translation } from "../i18n";
+import SiteLayout from "../layouts/SiteLayout.astro";
+import QuickStart from "./QuickStart.astro";
+import SiteFooter from "./SiteFooter.astro";
+import SiteHeader from "./SiteHeader.astro";
+
+interface Props {
+  locale: Locale;
+  copy: Translation;
+}
+
+const { locale, copy } = Astro.props;
+---
+
+<SiteLayout locale={locale} copy={copy}>
+  <a class="skip-link" href="#main">{copy.skip}</a>
+  <SiteHeader locale={locale} copy={copy} />
+
+  <nav class="page-rail" aria-label={copy.railLabel}>
+    <a class="active" href="#start" data-section-link="start" data-label="START"><span class="visually-hidden">{copy.nav.start}</span></a>
+    <a href="#protocols" data-section-link="protocols" data-label="PROTOCOLS"><span class="visually-hidden">{copy.nav.protocols}</span></a>
+    <a href="#access" data-section-link="access" data-label="ACCESS"><span class="visually-hidden">{copy.nav.access}</span></a>
+  </nav>
+
+  <main id="main">
+    <section class="panel hero" id="start" aria-labelledby="hero-title">
+      <div class="panel-inner shell">
+        <div class="section-topline">{copy.hero.topline}</div>
+        <div class="hero-grid">
+          <div class="hero-copy">
+            <p class="eyebrow">{copy.hero.eyebrow}</p>
+            <h1 id="hero-title">
+              <span>{copy.hero.titleBefore}</span>
+              <em>{copy.hero.titleAccent}</em>
+              <span>{copy.hero.titleAfter}</span>
+            </h1>
+          </div>
+          <div class="hero-intro">
+            <p class="lead"><strong>{copy.hero.leadStrong}</strong>{copy.hero.lead}</p>
+            <dl class="hero-facts" aria-label={copy.hero.factsLabel}>
+              {copy.hero.facts.map((fact) => <div><dt>{fact.term}</dt><dd>{fact.value}</dd></div>)}
+            </dl>
+          </div>
+          <QuickStart copy={copy.quickstart} />
+        </div>
+      </div>
+      <a class="scroll-cue" href="#protocols" aria-label={copy.hero.scrollLabel}>
+        <span>{copy.hero.scroll}</span><i aria-hidden="true"></i>
+      </a>
+    </section>
+
+    <section class="panel protocols" id="protocols" aria-labelledby="protocols-title">
+      <div class="panel-inner shell">
+        <div class="section-topline">{copy.protocols.topline}</div>
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">{copy.protocols.kicker}</p>
+            <h2 id="protocols-title">{copy.protocols.title}</h2>
+          </div>
+          <p class="section-lead">{copy.protocols.lead}</p>
+        </div>
+        <div class="protocol-grid">
+          {copy.protocols.items.map((protocol) => (
+            <article class="protocol-card">
+              <header><span>{protocol.id}</span><i>{copy.protocols.available}</i></header>
+              <h3>{protocol.name}</h3>
+              <p>{protocol.description}</p>
+              <code>{protocol.command}</code>
+            </article>
+          ))}
+        </div>
+        <div class="use-cases">
+          <strong>{copy.protocols.useCasesLabel}</strong>
+          {copy.protocols.useCases.map((useCase) => <span>{useCase}</span>)}
+        </div>
+      </div>
+    </section>
+
+    <section class="panel compare" id="access" aria-labelledby="access-title">
+      <div class="panel-inner shell">
+        <div class="section-topline">{copy.access.topline}</div>
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">{copy.access.kicker}</p>
+            <h2 id="access-title">{copy.access.title}</h2>
+          </div>
+          <p class="section-lead">{copy.access.lead}</p>
+        </div>
+
+        <div class="comparison" role="table" aria-label={copy.access.comparisonLabel}>
+          <div class="comparison-head" role="row">
+            <div class="legend" role="columnheader">{copy.access.legend.split("\n").map((line) => <span>{line}</span>)}</div>
+            <div class="plan-title featured" role="columnheader">
+              <span class="plan-meta">{copy.access.anonymous.status}</span>
+              <h3>{copy.access.anonymous.title}</h3>
+              <p>{copy.access.anonymous.description}</p>
+            </div>
+            <div class="plan-title" role="columnheader">
+              <span class="plan-meta">{copy.access.account.status}</span>
+              <h3>{copy.access.account.title}</h3>
+              <p>{copy.access.account.description}</p>
+            </div>
+          </div>
+          {copy.access.rows.map((row) => (
+            <div class:list={["comparison-row", { difference: "better" in row && row.better }] } role="row">
+              <div role="rowheader">{row.term}</div>
+              <div role="cell" class:list={{ unavailable: "unavailable" in row && row.unavailable }}>{row.anonymous}</div>
+              <div role="cell" class:list={{ better: "better" in row && row.better }}>{row.account}</div>
+            </div>
+          ))}
+          <div class="comparison-foot" role="row">
+            <span role="rowheader">{copy.access.recommended}</span>
+            <p role="cell">{copy.access.anonymousUse}</p>
+            <p role="cell">{copy.access.accountUse}</p>
+          </div>
+        </div>
+
+        <aside class="safety">
+          <strong>{copy.access.safetyLabel}</strong>
+          <p>{copy.access.safety}</p>
+        </aside>
+      </div>
+      <SiteFooter copy={copy.footer} />
+    </section>
+  </main>
+
+  <script>
+    const sections = [...document.querySelectorAll<HTMLElement>(".panel")];
+    const sectionLinks = [...document.querySelectorAll<HTMLAnchorElement>("[data-section-link]")];
+
+    if ("IntersectionObserver" in window) {
+      const observer = new IntersectionObserver(
+        (entries) => {
+          const visible = entries
+            .filter((entry) => entry.isIntersecting)
+            .sort((left, right) => right.intersectionRatio - left.intersectionRatio)[0];
+          if (!visible) return;
+          sectionLinks.forEach((link) => {
+            const active = link.dataset.sectionLink === visible.target.id;
+            link.classList.toggle("active", active);
+            if (active) link.setAttribute("aria-current", "location");
+            else link.removeAttribute("aria-current");
+          });
+        },
+        { threshold: [0.35, 0.6, 0.8] },
+      );
+      sections.forEach((section) => observer.observe(section));
+    }
+  </script>
+</SiteLayout>

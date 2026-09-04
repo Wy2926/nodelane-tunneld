@@ -1,0 +1,48 @@
+# Complete frps 0.70.0 configuration. Apply it manually after matching
+# auth.token with FRP_AUTH_TOKEN and enabling host networking for frps.
+
+# frpc control connection. Port 7000 must be a raw TCP route to frps. Do not
+# attach an HTTP/HTTPS health check or a layer-7 reverse proxy to this port.
+bindAddr = "0.0.0.0"
+bindPort = 7000
+
+# HTTP tunnel traffic enters here from the public port 80 proxy in 1Panel.
+# Keep 8080 private; the wildcard reverse proxy forwards requests to this port
+# and must preserve the original Host header.
+vhostHTTPPort = 8080
+subDomainHost = "tunnel.nodelane.net"
+
+# Public TCP tunnels use 20000-29999 and UDP tunnels use 30000-39999.
+# frps has one combined allow-list; tunneld allocates the protocol sub-ranges.
+allowPorts = [
+  { start = 20000, end = 39999 }
+]
+
+# Defense in depth. The product layer also enforces client/IP limits.
+maxPortsPerClient = 1
+detailedErrorsToClient = false
+
+# This token authenticates frpc and must match FRP_AUTH_TOKEN in tunneld .env.
+auth.method = "token"
+auth.token = "REPLACE_WITH_64_HEX_CHARACTERS"
+auth.additionalScopes = ["HeartBeats", "NewWorkConns"]
+
+# frp control traffic is encrypted. This does not use or change the public
+# tunnel.nodelane.net certificate managed by 1Panel/OpenResty.
+transport.tls.force = true
+transport.tcpMux = true
+transport.tcpMuxKeepaliveInterval = 30
+
+# Container logs remain available through docker logs.
+log.to = "console"
+# Temporarily change to "trace" when diagnosing TLS/yamux handshakes.
+log.level = "info"
+log.disablePrintColor = true
+
+# frps asks tunneld to authorize connections and proxy lifecycle operations.
+# This endpoint is loopback-only and must never be exposed by a public proxy.
+[[httpPlugins]]
+name = "nodelane-tunnel"
+addr = "127.0.0.1:9000"
+path = "/internal/frp"
+ops = ["Login", "NewProxy", "CloseProxy", "Ping", "NewWorkConn", "NewUserConn"]
