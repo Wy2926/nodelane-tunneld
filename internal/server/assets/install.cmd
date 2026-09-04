@@ -31,10 +31,10 @@ set "NT_WORK=%TEMP%\nodelane-tunnel-install-%RANDOM%-%RANDOM%"
 
 mkdir "%NT_WORK%" >nul 2>&1
 if errorlevel 1 set "NT_MESSAGE=Unable to create temporary directory: %NT_WORK%" & goto fail
-mkdir "%NT_VERSIONS%" >nul 2>&1
-if errorlevel 1 set "NT_MESSAGE=Unable to create installation directory: %NT_VERSIONS%" & goto fail
-mkdir "%NT_BIN_DIR%" >nul 2>&1
-if errorlevel 1 set "NT_MESSAGE=Unable to create command directory: %NT_BIN_DIR%" & goto fail
+if not exist "%NT_VERSIONS%\." mkdir "%NT_VERSIONS%" >nul 2>&1
+if not exist "%NT_VERSIONS%\." set "NT_MESSAGE=Unable to create installation directory: %NT_VERSIONS%" & goto fail
+if not exist "%NT_BIN_DIR%\." mkdir "%NT_BIN_DIR%" >nul 2>&1
+if not exist "%NT_BIN_DIR%\." set "NT_MESSAGE=Unable to create command directory: %NT_BIN_DIR%" & goto fail
 
 echo ==^> Checking the latest NodeLane Tunnel client...
 curl.exe -fsSL "%NT_RELEASE_BASE%/stable.txt" -o "%NT_WORK%\stable.txt"

@@ -3,12 +3,27 @@ package main
 import (
 	"bytes"
 	"io"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 
 	"charm.land/lipgloss/v2"
 )
+
+func TestColorWriterPreservesTerminalFileContract(t *testing.T) {
+	wrapped := colorWriter(os.Stdout)
+	file, ok := wrapped.(interface {
+		io.ReadWriteCloser
+		Fd() uintptr
+	})
+	if !ok {
+		t.Fatal("color writer hid the underlying terminal file contract")
+	}
+	if got, want := file.Fd(), os.Stdout.Fd(); got != want {
+		t.Fatalf("color writer descriptor = %d, want %d", got, want)
+	}
+}
 
 func TestInteractiveInputPrefersUsableStdinBeforeOpeningConsoleDevice(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")

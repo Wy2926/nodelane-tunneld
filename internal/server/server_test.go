@@ -299,23 +299,25 @@ func main() { if len(os.Args) > 1 && os.Args[1] == "--version" { fmt.Println("9.
 	if err := os.MkdirAll(temporary, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.CommandContext(context.Background(), "cmd.exe", "/d", "/q", "/c", "install.cmd --version")
-	command.Dir = root
-	command.Env = append(os.Environ(),
-		"NT_RELEASE_BASE="+release.URL,
-		"NT_BIN_DIR="+binDirectory,
-		"LOCALAPPDATA="+localData,
-		"TEMP="+temporary,
-		"TMP="+temporary,
-	)
-	var output bytes.Buffer
-	command.Stdout = &output
-	command.Stderr = &output
-	if err := command.Run(); err != nil {
-		t.Fatalf("installer failed: %v output=%q", err, output.String())
-	}
-	if !strings.Contains(output.String(), version) {
-		t.Fatalf("installer output does not include client version: %q", output.String())
+	for attempt := 1; attempt <= 2; attempt++ {
+		command := exec.CommandContext(context.Background(), "cmd.exe", "/d", "/q", "/c", "install.cmd --version")
+		command.Dir = root
+		command.Env = append(os.Environ(),
+			"NT_RELEASE_BASE="+release.URL,
+			"NT_BIN_DIR="+binDirectory,
+			"LOCALAPPDATA="+localData,
+			"TEMP="+temporary,
+			"TMP="+temporary,
+		)
+		var output bytes.Buffer
+		command.Stdout = &output
+		command.Stderr = &output
+		if err := command.Run(); err != nil {
+			t.Fatalf("installer attempt %d failed: %v output=%q", attempt, err, output.String())
+		}
+		if !strings.Contains(output.String(), version) {
+			t.Fatalf("installer attempt %d output does not include client version: %q", attempt, output.String())
+		}
 	}
 	if _, err := os.Stat(filepath.Join(binDirectory, "nt.cmd")); err != nil {
 		t.Fatalf("launcher not installed: %v", err)

@@ -61,6 +61,28 @@ type consoleUI struct {
 	warnings    map[string]struct{}
 }
 
+type terminalFile interface {
+	io.ReadWriteCloser
+	Fd() uintptr
+}
+
+type terminalColorWriter struct {
+	*colorprofile.Writer
+	terminal terminalFile
+}
+
+func (writer *terminalColorWriter) Read(data []byte) (int, error) {
+	return writer.terminal.Read(data)
+}
+
+func (writer *terminalColorWriter) Close() error {
+	return writer.terminal.Close()
+}
+
+func (writer *terminalColorWriter) Fd() uintptr {
+	return writer.terminal.Fd()
+}
+
 func newConsoleUI(out, errOut io.Writer) *consoleUI {
 	enableWindowsANSI(out)
 	enableWindowsANSI(errOut)
@@ -79,6 +101,9 @@ func colorWriter(writer io.Writer) io.Writer {
 	profileWriter := colorprofile.NewWriter(writer, os.Environ())
 	if supportsColor(writer) && os.Getenv("FORCE_COLOR") != "" && profileWriter.Profile < colorprofile.ANSI {
 		profileWriter.Profile = colorprofile.ANSI
+	}
+	if terminal, ok := writer.(terminalFile); ok {
+		return &terminalColorWriter{Writer: profileWriter, terminal: terminal}
 	}
 	return profileWriter
 }
