@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -48,16 +47,25 @@ func run(ui *consoleUI) error {
 		return nil
 	}
 
-	var input io.Reader
-	closeInput := func() {}
-	if argumentsNeedPrompt(args) {
-		input, closeInput, err = openInteractiveInput(ui)
+	values, interactive, err := prepareTarget(args, ui)
+	if err != nil {
+		return err
+	}
+	if interactive {
+		input, closeInput, openErr := openInteractiveInput(ui)
+		if openErr != nil {
+			return openErr
+		}
+		defer closeInput()
+		err = runTargetForm(&values, input, ui.out, ui)
+		if errors.Is(err, errTargetFormCanceled) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
 	}
-	defer closeInput()
-	target, err := resolveArgs(args, input, ui)
+	target, err := values.target(ui)
 	if err != nil {
 		return err
 	}
@@ -200,100 +208,13 @@ func run(ui *consoleUI) error {
 }
 
 func argumentsNeedPrompt(args []string) bool {
-	if len(args) < 2 {
-		return true
-	}
-	if len(args) == 2 && validProtocol(strings.ToLower(strings.TrimSpace(args[0]))) {
-		_, conversionErr := strconv.Atoi(strings.TrimSpace(args[1]))
-		return conversionErr != nil
-	}
-	return false
+	return len(args) < 3
 }
 
 type tunnelTarget struct {
 	protocol string
 	host     string
 	port     int
-}
-
-func resolveArgs(args []string, input io.Reader, ui *consoleUI) (tunnelTarget, error) {
-	target := tunnelTarget{host: "localhost"}
-	if len(args) > 3 {
-		return tunnelTarget{}, errors.New(ui.text(msgUsage))
-	}
-	needProtocol, needHost, needPort := false, false, false
-	var err error
-	switch len(args) {
-	case 0:
-		needProtocol, needHost, needPort = true, true, true
-	case 1:
-		value := strings.ToLower(strings.TrimSpace(args[0]))
-		if validProtocol(value) {
-			target.protocol, needPort = value, true
-		} else if parsedPort, err := parsePort(value, ui); err == nil {
-			target.port, needProtocol = parsedPort, true
-		} else {
-			if _, conversionErr := strconv.Atoi(value); conversionErr == nil {
-				return tunnelTarget{}, errors.New(ui.text(msgInvalidPort))
-			}
-			return tunnelTarget{}, errors.New(ui.text(msgInvalidProtocol))
-		}
-	case 2:
-		target.protocol = strings.ToLower(strings.TrimSpace(args[0]))
-		if !validProtocol(target.protocol) {
-			return tunnelTarget{}, errors.New(ui.text(msgInvalidProtocol))
-		}
-		if parsedPort, portErr := parsePort(args[1], ui); portErr == nil {
-			target.port = parsedPort
-		} else if _, conversionErr := strconv.Atoi(strings.TrimSpace(args[1])); conversionErr == nil {
-			return tunnelTarget{}, portErr
-		} else {
-			target.host, err = parseLocalHost(args[1], ui)
-			if err != nil {
-				return tunnelTarget{}, err
-			}
-			needPort = true
-		}
-	case 3:
-		target.protocol = strings.ToLower(strings.TrimSpace(args[0]))
-		if !validProtocol(target.protocol) {
-			return tunnelTarget{}, errors.New(ui.text(msgInvalidProtocol))
-		}
-		target.host, err = parseLocalHost(args[1], ui)
-		if err != nil {
-			return tunnelTarget{}, err
-		}
-		target.port, err = parsePort(args[2], ui)
-		if err != nil {
-			return tunnelTarget{}, err
-		}
-	}
-	if !needProtocol && !needHost && !needPort {
-		return target, nil
-	}
-	if input == nil {
-		return tunnelTarget{}, errors.New(ui.text(msgNoInteractiveArguments))
-	}
-	reader := bufio.NewReader(input)
-	if needProtocol {
-		target.protocol, err = promptProtocol(reader, ui)
-		if err != nil {
-			return tunnelTarget{}, err
-		}
-	}
-	if needHost {
-		target.host, err = promptLocalHost(reader, ui)
-		if err != nil {
-			return tunnelTarget{}, err
-		}
-	}
-	if needPort {
-		target.port, err = promptPort(reader, ui)
-		if err != nil {
-			return tunnelTarget{}, err
-		}
-	}
-	return target, nil
 }
 
 func validProtocol(value string) bool {

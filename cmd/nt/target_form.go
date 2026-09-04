@@ -2,8 +2,13 @@ package main
 
 import (
 	"errors"
+	"io"
 	"strings"
+
+	"charm.land/huh/v2"
 )
+
+var errTargetFormCanceled = errors.New("target form canceled")
 
 type targetField uint8
 
@@ -91,4 +96,65 @@ func (values targetFormValues) target(ui *consoleUI) (tunnelTarget, error) {
 		return tunnelTarget{}, err
 	}
 	return tunnelTarget{protocol: protocol, host: host, port: port}, nil
+}
+
+func validateOptionalHost(value string, ui *consoleUI) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	_, err := parseLocalHost(value, ui)
+	return err
+}
+
+func validatePortText(value string, ui *consoleUI) error {
+	_, err := parsePort(value, ui)
+	return err
+}
+
+func buildTargetForm(values *targetFormValues, ui *consoleUI) *huh.Form {
+	protocol := huh.NewSelect[string]().
+		Key("protocol").
+		Title(ui.text(msgChooseProtocol)).
+		Description(ui.text(msgProtocolNavigation)).
+		Options(
+			huh.NewOption("HTTP", "http"),
+			huh.NewOption("TCP", "tcp"),
+			huh.NewOption("UDP", "udp"),
+		).
+		Value(&values.Protocol).
+		Height(3)
+	host := huh.NewInput().
+		Key("host").
+		Title(ui.text(msgLocalAddressPrompt)).
+		Description(ui.text(msgLocalAddressDefaultHelp)).
+		Placeholder("localhost").
+		Value(&values.Host).
+		Validate(func(value string) error { return validateOptionalHost(value, ui) })
+	port := huh.NewInput().
+		Key("port").
+		Title(ui.text(msgPortPrompt)).
+		Description(ui.text(msgPortRangeHelp)).
+		Value(&values.Port).
+		CharLimit(5).
+		Validate(func(value string) error { return validatePortText(value, ui) })
+
+	form := huh.NewForm(huh.NewGroup(protocol, host, port)).
+		WithAccessible(false).
+		WithShowErrors(true).
+		WithShowHelp(false)
+	for field := targetProtocol; field < values.Focus; field++ {
+		form.NextField()
+	}
+	return form
+}
+
+func runTargetForm(values *targetFormValues, input io.Reader, output io.Writer, ui *consoleUI) error {
+	err := buildTargetForm(values, ui).
+		WithInput(input).
+		WithOutput(output).
+		Run()
+	if errors.Is(err, huh.ErrUserAborted) {
+		return errTargetFormCanceled
+	}
+	return err
 }

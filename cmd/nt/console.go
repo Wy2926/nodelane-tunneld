@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -102,22 +101,6 @@ func (ui *consoleUI) failure(message string) {
 	defer ui.mu.Unlock()
 	ui.clearStatusLocked()
 	fmt.Fprintf(ui.err, "%s %s\n", ui.paint("1;31", ui.text(msgStatusError)), message)
-}
-
-func (ui *consoleUI) prompt(label string) {
-	ui.mu.Lock()
-	defer ui.mu.Unlock()
-	ui.clearStatusLocked()
-	fmt.Fprintf(ui.out, "%s %s", ui.paint("1;35", "?"), label)
-}
-
-func (ui *consoleUI) protocolMenu() {
-	ui.mu.Lock()
-	defer ui.mu.Unlock()
-	fmt.Fprintln(ui.out, ui.paint("1", ui.text(msgChooseProtocol)))
-	fmt.Fprintf(ui.out, "  %s  HTTP  %s\n", ui.paint("1;36", "1"), ui.paint("2", ui.text(msgHTTPDescription)))
-	fmt.Fprintf(ui.out, "  %s  TCP   %s\n", ui.paint("1;36", "2"), ui.paint("2", ui.text(msgTCPDescription)))
-	fmt.Fprintf(ui.out, "  %s  UDP   %s\n", ui.paint("1;36", "3"), ui.paint("2", ui.text(msgUDPDescription)))
 }
 
 func (ui *consoleUI) banner() {
@@ -235,60 +218,4 @@ func openInteractiveInput(ui *consoleUI) (io.Reader, func(), error) {
 		return os.Stdin, func() {}, nil
 	}
 	return nil, func() {}, errors.New(ui.text(msgNoInteractiveInput))
-}
-
-func promptProtocol(reader *bufio.Reader, ui *consoleUI) (string, error) {
-	ui.protocolMenu()
-	for {
-		ui.prompt(ui.text(msgProtocolPrompt))
-		value, err := reader.ReadString('\n')
-		value = strings.ToLower(strings.TrimSpace(value))
-		switch value {
-		case "1", "http":
-			return "http", nil
-		case "2", "tcp":
-			return "tcp", nil
-		case "3", "udp":
-			return "udp", nil
-		}
-		if err != nil {
-			return "", errors.New(ui.text(msgProtocolReadFailed))
-		}
-		ui.warning(ui.text(msgInvalidProtocolChoice))
-	}
-}
-
-func promptLocalHost(reader *bufio.Reader, ui *consoleUI) (string, error) {
-	for {
-		ui.prompt(ui.text(msgLocalAddressPrompt))
-		value, readErr := reader.ReadString('\n')
-		value = strings.TrimSpace(value)
-		if value == "" && readErr == nil {
-			return "localhost", nil
-		}
-		host, parseErr := parseLocalHost(value, ui)
-		if parseErr == nil {
-			return host, nil
-		}
-		if readErr != nil {
-			return "", errors.New(ui.text(msgLocalAddressReadFailed))
-		}
-		ui.warning(ui.text(msgInvalidLocalAddressChoice))
-	}
-}
-
-func promptPort(reader *bufio.Reader, ui *consoleUI) (int, error) {
-	for {
-		ui.prompt(ui.text(msgPortPrompt))
-		value, err := reader.ReadString('\n')
-		value = strings.TrimSpace(value)
-		port, conversionErr := strconv.Atoi(value)
-		if conversionErr == nil && port >= 1 && port <= 65535 {
-			return port, nil
-		}
-		if err != nil {
-			return 0, errors.New(ui.text(msgPortReadFailed))
-		}
-		ui.warning(ui.text(msgInvalidPortChoice))
-	}
 }
