@@ -7,8 +7,8 @@ COPY web/ ./
 RUN pnpm build
 
 FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 ARG VERSION=dev
 WORKDIR /src
 RUN apk add --no-cache tar zip
