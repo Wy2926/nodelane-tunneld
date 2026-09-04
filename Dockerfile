@@ -1,4 +1,4 @@
-FROM node:24-alpine AS frontend-build
+FROM --platform=$BUILDPLATFORM node:24-alpine AS frontend-build
 WORKDIR /src/web
 RUN corepack enable && corepack prepare pnpm@10.33.2 --activate
 COPY web/package.json web/pnpm-lock.yaml ./
