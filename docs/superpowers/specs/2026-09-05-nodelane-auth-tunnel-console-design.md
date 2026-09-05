@@ -3,7 +3,7 @@
 - 日期：2026-09-05
 - 状态：修订版已获用户最终确认，作为分阶段实施的约束
 - 总体范围：`D:\Project\nodelane\auth`、`D:\Project\nodelane\nodelane-www`、`D:\Project\nodelane\nodelane-tunneld`
-- 实施状态：正在编写分阶段实施计划，业务代码尚未开始
+- 实施状态：auth 本地配置阶段已合入其 main；Tunnel 注册数据层已完成本地实现、验证和审查，尚未切换 API 或进入生产验收。
 
 ### 本次确认记录
 

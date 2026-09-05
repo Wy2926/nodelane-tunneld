@@ -10,6 +10,8 @@
 
 **Spec:** `../specs/2026-09-05-nodelane-auth-tunnel-console-design.md`; sections 2, 6, 7, 9, 13, 17, and 20. Foundation code is at `e225eed` on `codex/auth-console`.
 
+**Status:** Completed locally on 2026-09-05. Final code `7598f5d` passed whole-branch review, fix re-review, real PostgreSQL tests, and supported Linux race checks. See [validation and remaining scope](../validation/2026-09-05-control-persistence.md).
+
 ## Global Constraints
 
 - Task 1 runs in `D:/Project/nodelane/nodelane-tunneld/.worktrees/auth-console`. Tasks 2/3 run in separate task worktrees created from its reviewed infrastructure commit, then integrate back into `codex/auth-console`. User authorized parallel implementation on fixed contracts; owner files remain exclusive.
@@ -120,7 +122,7 @@ Freeze column-list constants `controlRouteColumns` and `controlRunColumns` along
 
 Replay helpers remain unexported. They do not authorize callers or renew deadlines: their owning use-case transaction must perform current authorization and lock-order checks first. `readControlReplay` returns `sql.ErrNoRows` for absence. Digests use SHA-256 plus lowercase hex, with typed JSON for request data. `saveControlReplay` seals the supplied metadata/payload and inserts the row; `openControlReplay` reconstructs exactly the authenticated metadata and decrypts. Callers generate `rpl_` IDs with the existing random-ID helper and supply the original microsecond timestamps. This shared code prevents route and run workers from implementing incompatible replay storage.
 
-- [ ] **Step 1: Write failing migration/configuration tests and the guarded test helper.**
+- [x] **Step 1: Write failing migration/configuration tests and the guarded test helper.**
 
 The helper reads only `NODELANE_TEST_DATABASE_URL`; unset means an explicitly reported integration skip. Parse its effective connection settings with `pgx.ParseConfig`, not only the URI. Reject non-loopback effective hosts/fallback hosts, another database, query overrides for host/hostaddr/port/dbname/database/user/password, `options`, or any startup override of `nodelane.test_marker`. Before DDL, verify live `current_database()`, the server marker, and `inet_server_addr()` against the private/loopback fixture boundary (Docker's server-side address may be private rather than loopback). Never allow a DSN to set the marker itself. Create a unique `ctl_test_` schema per test, quoted with `pgx.Identifier.Sanitize()`, and set `search_path` through a parsed DSN query parameter only after the guard. Register cleanup for only that generated schema and close pools before schema removal. Never read `DATABASE_URL` as a fallback.
 
@@ -153,13 +155,13 @@ if err := db.QueryRowContext(ctx,
 if version != 1 { t.Fatalf("migration version = %d", version) }
 ```
 
-- [ ] **Step 2: Run RED against the isolated fixture.**
+- [x] **Step 2: Run RED against the isolated fixture.**
 
 The controller may start the pinned test image with a generated name, a task-owner label, tmpfs PostgreSQL data, UTC, the exact database/marker above, a synthetic password, and a loopback-only ephemeral host port. This is the only permitted database target. Capture its ID and port through structured Docker inspect data. Test code must not start or delete arbitrary containers. No production database is initialized.
 
 Run `go test ./internal/store -run TestControl -count=1` with the explicit fixture DSN. Missing production APIs/schema must be the failure; do not accept a skipped suite as RED or GREEN.
 
-- [ ] **Step 3: Implement migration and shared infrastructure.**
+- [x] **Step 3: Implement migration and shared infrastructure.**
 
 Add Goose `github.com/pressly/goose/v3 v3.28.0`. Use an embedded migration FS and the verified provider API:
 
@@ -196,11 +198,11 @@ Validate options before connection: peppers at least 32 bytes, replay key exactl
 
 `withControlTx` begins/rolls back/commits and retries the complete callback at most three times only for SQLSTATE `40001` or `40P01`, respecting context. It never retries an uncertain connection/commit outcome. `lockControlAccounts` sorts/deduplicates IDs, locks existing rows in that order, and rejects missing owners. Scanners handle nullable values without hiding scan errors. Sample `nowUTC()` after locks, using UTC microsecond precision.
 
-- [ ] **Step 4: Verify and publish the shared contract.**
+- [x] **Step 4: Verify and publish the shared contract.**
 
 Run all non-skipped `TestControl` integration tests plus existing `go test ./...` and `go vet ./...`. Confirm the fixture remains the only database touched. Publish constructor/command/transaction/scanner contracts for Tasks 2/3; do not alter them independently after those workers start.
 
-- [ ] **Step 5: Commit and independently review.**
+- [x] **Step 5: Commit and independently review.**
 
 The controller stages only Task 1 paths and commits `feat: add fresh control schema and migration guard`. Reports remain ignored, not force-added. The user-authorized parallel batch for Tasks 2/3 begins after this common infrastructure passes its task gate.
 
@@ -221,17 +223,17 @@ func (p *ControlPostgres) IssueLaunchCode(ctx context.Context, cmd domain.IssueL
 func (p *ControlPostgres) ReleaseExpiredNames(ctx context.Context, limit int) (int, error)
 ```
 
-- [ ] **Step 1: Write failing real-DB tests.**
+- [x] **Step 1: Write failing real-DB tests.**
 
 Verify issuer+subject projection idempotence/concurrency and no email identity key; owned/foreign route access; five-route limit even under concurrent creation; same-label races across accounts; deleted entries excluded from quota; stop/delete distinction; restoration before/at cutoff and at capacity; expired-label transfer to a different account with a different route/proxy ID; old owner cannot restore after transfer; launch code hash-only storage, ten-minute expiry, active-run rejection and delete revocation.
 
 Creation replay tests use the same account/key/body twice and require the same route ID with `Replayed=true`, one row, and no second quota charge. Same key with different body must return `ErrIdempotencyConflict`; a deleted resource is not recreated through replay. Use literal expected row counts, not the implementation's own helpers as expected results.
 
-- [ ] **Step 2: Observe RED with the explicit test DSN.**
+- [x] **Step 2: Observe RED with the explicit test DSN.**
 
 Run `go test ./internal/store -run 'TestControlAccount|TestControlRoute|TestControlLaunchIssue' -count=1`. Do not run the full suite while the run worker is editing; the controller performs the join gate.
 
-- [ ] **Step 3: Implement atomic account/route operations.**
+- [x] **Step 3: Implement atomic account/route operations.**
 
 Projection upserts only `(identity_issuer, identity_subject)` and updates last-seen without changing identity. Every account-facing route query scopes SQL by `account_id`; missing and foreign rows both return `ErrRouteNotFound`.
 
@@ -243,11 +245,11 @@ Hash the idempotency key and a typed JSON request containing protocol/label. The
 
 Issue new launch codes only for an owned active route with no active run, using the reviewed generator and the launch pepper. Return plaintext only in the typed result, never store or log it.
 
-- [ ] **Step 4: Verify focused tests and publish the cleanup method.**
+- [x] **Step 4: Verify focused tests and publish the cleanup method.**
 
 Run the focused real-DB suite and `gofmt` on owned files, then the full suite in this task's own worktree. `ReleaseExpiredNames` is a route-lifecycle operation for the later coordinator; the run worker does not depend on it. Commit only owner paths on the task branch; the controller reviews and integrates task commits in sequence.
 
-- [ ] **Step 5: Controller commit and independent review.**
+- [x] **Step 5: Controller commit and independent review.**
 
 Commit message: `feat: persist account and permanent route lifecycle`. Review quota/name/replay/delete interactions, not just CRUD success.
 
@@ -269,17 +271,17 @@ func (p *ControlPostgres) ConfirmOffline(ctx context.Context, evidence domain.Ru
 func (p *ControlPostgres) Sweep(ctx context.Context, limit int) (domain.SweepResult, error)
 ```
 
-- [ ] **Step 1: Write failing real-DB concurrency and expiry tests.**
+- [x] **Step 1: Write failing real-DB concurrency and expiry tests.**
 
 Require one successful concurrent start per route, code not consumed on active-slot conflict, and no usable result on a failed transaction. For launch replay, verify the complete secret again, distinguish the same nonce from a different nonce, recover the same credential after discarding the original response and reopening the store, and reject expired/corrupt/swapped replay metadata. Changed valid transport IP must preserve the original replay. The current launch body has no additional operation-affecting field; verify changed request hashes/associations through tamper rejection, without inventing a body parameter. Account-start same-key/different-route requests must conflict. Include redemption near code expiry: its valid committed two-minute replay may outlive initial code expiry but cannot outlive its own expiry or current run validity.
 
 Test account-start replay with current ownership, exact connection/lease boundaries, expired-but-unswept credentials, wrong run/token namespace, starting heartbeats not extending first-connect deadline, established heartbeats extending only valid leases, stop/delete versus replay races, repeated stops, late evidence, and cleanup retention. Raw SQL confirms only hashes and ciphertext are stored, with no raw token in text/bytea fields.
 
-- [ ] **Step 2: Observe RED.**
+- [x] **Step 2: Observe RED.**
 
 Run `go test ./internal/store -run 'TestControlRun|TestControlRedeem|TestControlCleanup' -count=1` with the explicit guarded test DSN. Required external operations are against the isolated fixture only.
 
-- [ ] **Step 3: Implement transactionally.**
+- [x] **Step 3: Implement transactionally.**
 
 Parse and hash full run/launch tokens using the correct namespace and pepper. Account IDs are trusted internal inputs from the future authentication layer; never accept a replay key as authentication. Nonlocking lookup may discover parent IDs, but locks and all current-state checks must be reacquired in canonical order before mutation or decryption.
 
@@ -293,11 +295,11 @@ Stop operations change desired state to stopped and status to stopping while ret
 
 Sweep first discovers candidates without row locks, then processes bounded items in canonical lock order. Expiry moves runs to stopping and denies further authorization, never fabricates disconnection. Delete only offline runs after stopped-at plus two minutes and all associated replay windows have elapsed; delete credentials/replays in foreign-key-safe order. Expired launch codes remain while a valid launch replay still needs their hash. Name release is the separate `ReleaseExpiredNames` operation owned by Task 2; the later coordinator invokes both, so this task does not require peer code to compile. Never delete an active route, an active slot, or a credential needed by an unexpired replay.
 
-- [ ] **Step 4: Join and verify all persistence behavior.**
+- [x] **Step 4: Join and verify all persistence behavior.**
 
 Run focused and full tests in this task's separate worktree. After both reviewed task branches integrate, the controller runs all `TestControl` real-DB tests, `go test ./... -count=1`, `go vet ./...`, and whitespace checks on the joined branch. Add a controller-owned integration test file for create/delete/restore versus start/stop/replay races that require both task APIs together. Concurrency tests use barriers and exact success/row-count assertions, not sleeps. Where Windows CGO is unavailable, run race checks in an isolated supported Linux environment or report the gap explicitly.
 
-- [ ] **Step 5: Controller commit and broad data-layer review.**
+- [x] **Step 5: Controller commit and broad data-layer review.**
 
 Commit message: `feat: persist atomic run authorization and replay`. Review the combined persistence range for lock order and cross-operation races after per-task reviews. Fix any load-bearing findings before API integration. Keep test evidence and the isolated fixture identity in the ledger; stop/remove only the test container owned by this execution.
 

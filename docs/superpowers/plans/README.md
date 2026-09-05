@@ -32,11 +32,21 @@ This index coordinates the independently executable phase plans required by sect
 
 `SCOPE-01` and `SCOPE-02` bind every phase. The acceptance mapping assigns ownership; an overlapping ID still needs one complete end-to-end evidence record.
 
+## Local Delivery Status
+
+| Phase | Local Evidence | Remaining Acceptance |
+| --- | --- | --- |
+| Identity deployment | Local auth main at `a22e375`; offline configuration/contract checks passed, 80 tests | Real Resend, Google, SSO, Device Flow, and deployment remain unverified |
+| Persistent domain | [Foundation](2026-09-05-control-domain-foundation.md) and [persistence](2026-09-05-control-persistence.md) implemented; final code `7598f5d` passed real-PostgreSQL tests and independent review | Library is not wired into legacy server/API; no production database initialized |
+| BFF/API and later phases | Separate phase plans remain the next work | Runtime integration, CLI/UI, native statistics, staging and production |
+
+The [local persistence validation record](../validation/2026-09-05-control-persistence.md) includes exact commands, the Linux `TERM=dumb` prerequisite, the inherited headless CLI limitation, and the boundary between local evidence and live acceptance.
+
 ## First Executable Plan
 
 The first phase plan is `D:/Project/nodelane/auth/docs/superpowers/plans/2026-09-05-logto-bootstrap.md`. All paths inside it are relative to the auth project root unless explicitly stated otherwise.
 
-The user has approved the product spec and isolated worktrees. Execution setup creates an implementation worktree for each existing repository and initializes the auth directory as a separate local Git project with its own implementation worktree. Do not edit application code on either existing `main` checkout. No remote repository, push, or deployment is authorized by this workspace setup.
+The user approved the product spec, isolated worktrees, and the subsequent local auth main merge. Initial setup created implementation worktrees and initialized auth as a separate local Git project. Tunnel application work remains isolated on `codex/auth-console`; no Tunnel main merge, remote publication, or deployment has been authorized.
 
 ## Execution and Evidence
 
