@@ -2,6 +2,7 @@ package main
 
 var catalogKO = map[messageID]string{
 	msgStatusOK: "성공", msgStatusWarning: "경고", msgStatusError: "오류",
+	msgDirectCommandHint:       "다음부터는 nt 명령 하나로 바로 사용할 수 있습니다.",
 	msgUsage:                   "사용법: nt [--lang 언어] [http|tcp|udp] [로컬 주소] [로컬 포트]",
 	msgHelpDescription:         "인수 없이 실행하면 nt가 프로토콜, 로컬 주소, 포트를 차례로 묻습니다. 로컬 주소 기본값은 localhost입니다.",
 	msgHelpLanguage:            "--lang 언어로 표시 언어를 선택하고, ‘nt languages’로 목록을 확인하세요.",
@@ -29,7 +30,7 @@ var catalogKO = map[messageID]string{
 	msgConnectTimeout: "내장 frp 클라이언트가 12초 안에 연결되지 않았습니다\n%s", msgFRPStoppedUnexpectedly: "내장 frp 클라이언트가 예기치 않게 중지되었습니다",
 	msgFRPStopped: "내장 frp 클라이언트가 중지되었습니다: %v\n%s", msgTunnelConnected: "터널 연결됨",
 	msgClientLabel: "클라이언트", msgLocalAddressLabel: "로컬 주소", msgPublicAddressLabel: "공개 주소", msgExpiresAtLabel: "만료 시각",
-	msgHTTPRequestInstruction: "HTTP 요청 로그  ·  시간 / IP / 메서드 / 주소  ·  Ctrl+C로 중지",
+	msgHTTPRequestInstruction: "HTTP 요청 로그  ·  시간 / IP / 메서드 / 상태 / 주소  ·  Ctrl+C로 중지",
 	msgTrafficInstruction:     "실시간 트래픽  ·  수신: 공개 → 로컬 / 송신: 로컬 → 공개  ·  Ctrl+C로 중지",
 	msgTrafficStats:           "활성 %s  누적 %s  수신 %s  송신 %s", msgUnsupportedMonitorProtocol: "지원하지 않는 모니터링 프로토콜 %q",
 	msgStartHTTPMonitorFailed: "HTTP 요청 모니터 시작: %v", msgHTTPServiceUnavailable: "로컬 HTTP 서비스를 사용할 수 없습니다: %v",

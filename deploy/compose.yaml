@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
       args:
         VERSION: ${TUNNELD_VERSION:-dev}
+        NT_VERSION: ${NT_VERSION:-}
     restart: unless-stopped
     # Production target is Linux. Host networking preserves the loopback
     # trust boundary between Caddy/frps and tunneld.

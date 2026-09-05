@@ -214,8 +214,8 @@ wildcard hostname has working TLS termination.
 
 ### 4. Build and start
 
-Set `TUNNELD_VERSION` in `.env` to the version being deployed, then build the
-image and start the control plane:
+Set `TUNNELD_VERSION` in `.env` to the control-plane version being deployed,
+then build the image and start the control plane:
 
 ```sh
 docker compose --env-file .env -f deploy/compose.yaml up -d --build
@@ -224,9 +224,14 @@ docker compose --env-file .env -f deploy/compose.yaml logs --tail=100 tunneld
 ```
 
 The image build compiles `tunneld`, builds the Astro website, builds all four
-`nt` packages, and stores the packages under `/releases`. Database tables and
-indexes are created idempotently at startup; the PostgreSQL database and role
-must already exist.
+`nt` packages, and stores the packages under `/releases`. The client version is
+pinned separately in `client-version.txt`; a control-plane or website release
+therefore does not make users reinstall an unchanged client. Change that file
+only when `cmd/nt`, `internal/client`, or an `nt` dependency changes. Set
+`NT_VERSION` only when a deliberate build-time override is needed.
+
+Database tables and indexes are created idempotently at startup; the PostgreSQL
+database and role must already exist.
 
 To deploy a prebuilt image from any OCI registry, set `TUNNELD_IMAGE` and use:
 
@@ -257,7 +262,14 @@ sh deploy/publish-image.sh ghcr.io 0.4.2 your-account/nodelane-tunneld
 ```
 
 No registry credentials are accepted by the scripts; authenticate with Docker
-before publishing.
+before publishing. Both scripts read the pinned client version from
+`client-version.txt`; PowerShell also accepts `-ClientVersion`, and the POSIX
+script accepts a fourth client-version argument for deliberate overrides.
+
+Client GitHub releases are independent from container releases. After changing
+`client-version.txt`, create an `nt-v<version>` tag (for example,
+`nt-v0.4.4`) to publish the four client packages. The release workflow rejects
+a tag that does not match the pinned client version.
 
 ### 5. Point clients to another deployment
 
@@ -414,9 +426,10 @@ website output is also committed so ordinary Go builds do not require Node.js.
 | `internal/server` | HTTP API, plugin callbacks, static assets, admin routes |
 | `internal/store` | In-memory and PostgreSQL repositories |
 | `internal/lease` | In-memory and Redis lease managers |
+| `client-version.txt` | Client version served by newly built container images |
 | `web` | Astro website and translations |
 | `deploy` | Compose, frps, reverse-proxy, build, and publish examples |
-| `.github/workflows/release.yml` | Tagged `nt` release packages for four targets |
+| `.github/workflows/release.yml` | `nt-v*` tagged client packages for four targets |
 
 ## Contributing and security
 

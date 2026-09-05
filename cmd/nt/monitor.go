@@ -35,6 +35,49 @@ type forwardingRequestState struct {
 
 type forwardingRequestStateKey struct{}
 
+type statusResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+	onStatus   func(int)
+}
+
+func (writer *statusResponseWriter) WriteHeader(statusCode int) {
+	// Informational responses may be followed by the final response status.
+	if statusCode >= 100 && statusCode < 200 && statusCode != http.StatusSwitchingProtocols {
+		writer.ResponseWriter.WriteHeader(statusCode)
+		return
+	}
+	if writer.statusCode != 0 {
+		return
+	}
+	writer.statusCode = statusCode
+	writer.ResponseWriter.WriteHeader(statusCode)
+	if writer.onStatus != nil {
+		writer.onStatus(statusCode)
+	}
+}
+
+func (writer *statusResponseWriter) Write(data []byte) (int, error) {
+	if writer.statusCode == 0 {
+		writer.WriteHeader(http.StatusOK)
+	}
+	return writer.ResponseWriter.Write(data)
+}
+
+func (writer *statusResponseWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+
+func (writer *statusResponseWriter) reportDefaultStatus() {
+	if writer.statusCode != 0 {
+		return
+	}
+	writer.statusCode = http.StatusOK
+	if writer.onStatus != nil {
+		writer.onStatus(writer.statusCode)
+	}
+}
+
 type trafficCounters struct {
 	active   atomic.Int64
 	total    atomic.Int64
@@ -108,11 +151,20 @@ func startHTTPMonitor(ctx context.Context, targetHost string, targetPort int, ui
 		http.Error(writer, ui.text(msgHTTPServiceUnavailableBody), http.StatusBadGateway)
 	}
 	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		startedAt := time.Now()
 		address := request.Host + request.URL.RequestURI()
-		ui.request(time.Now(), requestIP(request), request.Method, address)
+		ip := requestIP(request)
+		method := request.Method
+		responseWriter := &statusResponseWriter{
+			ResponseWriter: writer,
+			onStatus: func(statusCode int) {
+				ui.request(startedAt, ip, method, statusCode, address)
+			},
+		}
 		state := &forwardingRequestState{}
 		request = request.WithContext(context.WithValue(request.Context(), forwardingRequestStateKey{}, state))
-		proxy.ServeHTTP(writer, request)
+		proxy.ServeHTTP(responseWriter, request)
+		responseWriter.reportDefaultStatus()
 		if !state.failed {
 			ui.resetWarning(httpUpstreamWarning)
 		}

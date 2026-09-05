@@ -12,6 +12,7 @@ const (
 	msgStatusOK                   messageID = "status.ok"
 	msgStatusWarning              messageID = "status.warning"
 	msgStatusError                messageID = "status.error"
+	msgDirectCommandHint          messageID = "brand.direct_command_hint"
 	msgUsage                      messageID = "help.usage"
 	msgHelpDescription            messageID = "help.description"
 	msgHelpLanguage               messageID = "help.language"

@@ -2,6 +2,7 @@ package main
 
 var catalogZhCN = map[messageID]string{
 	msgStatusOK: "成功", msgStatusWarning: "警告", msgStatusError: "错误",
+	msgDirectCommandHint:       "下次直接运行 nt 即可，一行命令就能使用。",
 	msgUsage:                   "用法: nt [--lang 语言] [http|tcp|udp] [本地地址] [本地端口]",
 	msgHelpDescription:         "不带参数运行时，nt 会依次询问协议、本地地址和端口；本地地址默认为 localhost。",
 	msgHelpLanguage:            "使用 --lang 语言 设置显示语言；运行“nt languages”查看语言列表。",
@@ -29,7 +30,7 @@ var catalogZhCN = map[messageID]string{
 	msgConnectTimeout: "内置 frp 客户端未能在 12 秒内连接\n%s", msgFRPStoppedUnexpectedly: "内置 frp 客户端意外停止",
 	msgFRPStopped: "内置 frp 客户端已停止：%v\n%s", msgTunnelConnected: "隧道连接成功",
 	msgClientLabel: "客户端", msgLocalAddressLabel: "本地地址", msgPublicAddressLabel: "公网地址", msgExpiresAtLabel: "到期时间",
-	msgHTTPRequestInstruction: "HTTP 请求日志  ·  时间 / IP / 方法 / 地址  ·  Ctrl+C 停止",
+	msgHTTPRequestInstruction: "HTTP 请求日志  ·  时间 / IP / 方法 / 状态码 / 地址  ·  Ctrl+C 停止",
 	msgTrafficInstruction:     "实时流量  ·  接收: 公网 → 本地 / 发送: 本地 → 公网  ·  Ctrl+C 停止",
 	msgTrafficStats:           "当前连接 %s  累计 %s  接收 %s  发送 %s", msgUnsupportedMonitorProtocol: "不支持监控协议 %q",
 	msgStartHTTPMonitorFailed: "启动 HTTP 请求监控：%v", msgHTTPServiceUnavailable: "本地 HTTP 服务不可用：%v",

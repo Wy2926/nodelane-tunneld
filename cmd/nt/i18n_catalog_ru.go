@@ -2,6 +2,7 @@ package main
 
 var catalogRU = map[messageID]string{
 	msgStatusOK: "ГОТОВО", msgStatusWarning: "ВНИМАНИЕ", msgStatusError: "ОШИБКА",
+	msgDirectCommandHint:       "В следующий раз просто запустите nt — достаточно одной команды.",
 	msgUsage:                   "Использование: nt [--lang ЯЗЫК] [http|tcp|udp] [локальный адрес] [локальный порт]",
 	msgHelpDescription:         "При запуске без аргументов nt запросит протокол, локальный адрес и порт. Локальный адрес по умолчанию — localhost.",
 	msgHelpLanguage:            "Выберите язык через --lang ЯЗЫК; «nt languages» выводит список.",
@@ -29,7 +30,7 @@ var catalogRU = map[messageID]string{
 	msgConnectTimeout: "встроенный клиент frp не подключился за 12 секунд\n%s", msgFRPStoppedUnexpectedly: "встроенный клиент frp неожиданно остановился",
 	msgFRPStopped: "встроенный клиент frp остановился: %v\n%s", msgTunnelConnected: "Туннель подключён",
 	msgClientLabel: "Клиент", msgLocalAddressLabel: "Локальный адрес", msgPublicAddressLabel: "Публичный адрес", msgExpiresAtLabel: "Истекает",
-	msgHTTPRequestInstruction: "HTTP-запросы  ·  время / IP / метод / адрес  ·  Ctrl+C для остановки",
+	msgHTTPRequestInstruction: "HTTP-запросы  ·  время / IP / метод / статус / адрес  ·  Ctrl+C для остановки",
 	msgTrafficInstruction:     "Трафик  ·  получено: публичный → локальный / отправлено: локальный → публичный  ·  Ctrl+C для остановки",
 	msgTrafficStats:           "активно %s  всего %s  получено %s  отправлено %s", msgUnsupportedMonitorProtocol: "неподдерживаемый протокол мониторинга %q",
 	msgStartHTTPMonitorFailed: "запустить монитор HTTP: %v", msgHTTPServiceUnavailable: "Локальный HTTP-сервис недоступен: %v",

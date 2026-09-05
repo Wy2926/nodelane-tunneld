@@ -2,6 +2,7 @@ package main
 
 var catalogJA = map[messageID]string{
 	msgStatusOK: "成功", msgStatusWarning: "警告", msgStatusError: "エラー",
+	msgDirectCommandHint:       "次回からは nt を実行するだけで使えます。",
 	msgUsage:                   "使用方法: nt [--lang 言語] [http|tcp|udp] [ローカルアドレス] [ローカルポート]",
 	msgHelpDescription:         "引数なしで実行すると、nt がプロトコル、ローカルアドレス、ポートを順に確認します。ローカルアドレスの既定値は localhost です。",
 	msgHelpLanguage:            "--lang 言語 で表示言語を選択できます。「nt languages」で一覧を表示します。",
@@ -29,7 +30,7 @@ var catalogJA = map[messageID]string{
 	msgConnectTimeout: "内蔵 frp クライアントが 12 秒以内に接続できませんでした\n%s", msgFRPStoppedUnexpectedly: "内蔵 frp クライアントが予期せず停止しました",
 	msgFRPStopped: "内蔵 frp クライアントが停止しました: %v\n%s", msgTunnelConnected: "トンネルに接続しました",
 	msgClientLabel: "クライアント", msgLocalAddressLabel: "ローカルアドレス", msgPublicAddressLabel: "公開アドレス", msgExpiresAtLabel: "有効期限",
-	msgHTTPRequestInstruction: "HTTP リクエストログ  ·  時刻 / IP / メソッド / アドレス  ·  Ctrl+C で停止",
+	msgHTTPRequestInstruction: "HTTP リクエストログ  ·  時刻 / IP / メソッド / ステータス / アドレス  ·  Ctrl+C で停止",
 	msgTrafficInstruction:     "リアルタイム通信  ·  受信: 公開 → ローカル / 送信: ローカル → 公開  ·  Ctrl+C で停止",
 	msgTrafficStats:           "接続中 %s  合計 %s  受信 %s  送信 %s", msgUnsupportedMonitorProtocol: "未対応の監視プロトコル %q",
 	msgStartHTTPMonitorFailed: "HTTP リクエスト監視の開始: %v", msgHTTPServiceUnavailable: "ローカル HTTP サービスを利用できません: %v",

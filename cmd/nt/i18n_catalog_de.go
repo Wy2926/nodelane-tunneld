@@ -2,6 +2,7 @@ package main
 
 var catalogDE = map[messageID]string{
 	msgStatusOK: "OK", msgStatusWarning: "WARNUNG", msgStatusError: "FEHLER",
+	msgDirectCommandHint:       "Beim nächsten Mal genügt der Befehl nt.",
 	msgUsage:                   "Aufruf: nt [--lang SPRACHE] [http|tcp|udp] [lokale Adresse] [lokaler Port]",
 	msgHelpDescription:         "Ohne Argumente fragt nt nach Protokoll, lokaler Adresse und Port. Die lokale Adresse ist standardmäßig localhost.",
 	msgHelpLanguage:            "Mit --lang SPRACHE die Anzeigesprache wählen; „nt languages“ zeigt die Liste.",
@@ -29,7 +30,7 @@ var catalogDE = map[messageID]string{
 	msgConnectTimeout: "der eingebettete frp-Client hat sich nicht innerhalb von 12 Sekunden verbunden\n%s", msgFRPStoppedUnexpectedly: "der eingebettete frp-Client wurde unerwartet beendet",
 	msgFRPStopped: "der eingebettete frp-Client wurde beendet: %v\n%s", msgTunnelConnected: "Tunnel verbunden",
 	msgClientLabel: "Client", msgLocalAddressLabel: "Lokale Adresse", msgPublicAddressLabel: "Öffentliche Adresse", msgExpiresAtLabel: "Läuft ab",
-	msgHTTPRequestInstruction: "HTTP-Anfragen  ·  Zeit / IP / Methode / Adresse  ·  Strg+C zum Beenden",
+	msgHTTPRequestInstruction: "HTTP-Anfragen  ·  Zeit / IP / Methode / Status / Adresse  ·  Strg+C zum Beenden",
 	msgTrafficInstruction:     "Live-Datenverkehr  ·  empfangen: öffentlich → lokal / gesendet: lokal → öffentlich  ·  Strg+C zum Beenden",
 	msgTrafficStats:           "aktiv %s  gesamt %s  empfangen %s  gesendet %s", msgUnsupportedMonitorProtocol: "nicht unterstütztes Überwachungsprotokoll %q",
 	msgStartHTTPMonitorFailed: "HTTP-Überwachung starten: %v", msgHTTPServiceUnavailable: "Lokaler HTTP-Dienst nicht verfügbar: %v",

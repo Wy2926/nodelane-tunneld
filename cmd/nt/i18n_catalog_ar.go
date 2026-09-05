@@ -2,6 +2,7 @@ package main
 
 var catalogAR = map[messageID]string{
 	msgStatusOK: "تم", msgStatusWarning: "تحذير", msgStatusError: "خطأ",
+	msgDirectCommandHint:       "في المرة القادمة، شغّل nt فقط؛ أمر واحد يكفي.",
 	msgUsage:                   "الاستخدام: nt [--lang اللغة] [http|tcp|udp] [العنوان المحلي] [المنفذ المحلي]",
 	msgHelpDescription:         "عند التشغيل دون معاملات، يطلب nt البروتوكول والعنوان المحلي والمنفذ. العنوان المحلي الافتراضي هو localhost.",
 	msgHelpLanguage:            "استخدم --lang اللغة لاختيار لغة العرض؛ نفّذ «nt languages» لعرض القائمة.",
@@ -29,7 +30,7 @@ var catalogAR = map[messageID]string{
 	msgConnectTimeout: "لم يتصل عميل frp المضمّن خلال 12 ثانية\n%s", msgFRPStoppedUnexpectedly: "توقف عميل frp المضمّن بشكل غير متوقع",
 	msgFRPStopped: "توقف عميل frp المضمّن: %v\n%s", msgTunnelConnected: "تم اتصال النفق",
 	msgClientLabel: "العميل", msgLocalAddressLabel: "العنوان المحلي", msgPublicAddressLabel: "العنوان العام", msgExpiresAtLabel: "ينتهي في",
-	msgHTTPRequestInstruction: "سجل طلبات HTTP  ·  الوقت / IP / الطريقة / العنوان  ·  Ctrl+C للإيقاف",
+	msgHTTPRequestInstruction: "سجل طلبات HTTP  ·  الوقت / IP / الطريقة / الحالة / العنوان  ·  Ctrl+C للإيقاف",
 	msgTrafficInstruction:     "الحركة المباشرة  ·  مستلم: عام ← محلي / مرسل: محلي ← عام  ·  Ctrl+C للإيقاف",
 	msgTrafficStats:           "نشطة %s  الإجمالي %s  مستلم %s  مرسل %s", msgUnsupportedMonitorProtocol: "بروتوكول مراقبة غير مدعوم %q",
 	msgStartHTTPMonitorFailed: "بدء مراقبة HTTP: %v", msgHTTPServiceUnavailable: "خدمة HTTP المحلية غير متاحة: %v",

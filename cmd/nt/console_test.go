@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/term"
@@ -108,6 +109,7 @@ func TestConsoleRoutesHumanWarningsToStdoutAndFailuresToStderr(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	ui := newConsoleUI(&stdout, &stderr)
 	ui.banner()
+	ui.banner()
 	ui.warning("retry later")
 	ui.failure("cannot connect")
 
@@ -115,6 +117,14 @@ func TestConsoleRoutesHumanWarningsToStdoutAndFailuresToStderr(t *testing.T) {
 	errOut := stderr.String()
 	if strings.Count(out, "NodeLane Tunnel") != 1 {
 		t.Fatalf("stdout brand count = %d; output: %q", strings.Count(out, "NodeLane Tunnel"), out)
+	}
+	if !strings.Contains(out, "run nt") {
+		t.Fatalf("direct nt command hint missing from stdout: %q", out)
+	}
+	for _, art := range []string{"_   _ _____", "|_| \\_| |_|"} {
+		if !strings.Contains(out, art) {
+			t.Fatalf("brand art is missing %q from stdout: %q", art, out)
+		}
 	}
 	if !strings.Contains(out, "retry later") {
 		t.Fatalf("warning missing from stdout: %q", out)
@@ -154,6 +164,18 @@ func TestConsoleForcedColorUsesStyledOutput(t *testing.T) {
 	ui.success("connected")
 	if !strings.Contains(stdout.String(), "\x1b[") {
 		t.Fatalf("forced-color output is unstyled: %q", stdout.String())
+	}
+}
+
+func TestConsoleRequestIncludesHTTPStatus(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	var stdout bytes.Buffer
+	ui := newConsoleUI(&stdout, &bytes.Buffer{})
+	ui.request(time.Date(2026, time.September, 5, 12, 0, 0, 0, time.Local), "203.0.113.9", "GET", 404, "demo.example/missing")
+	for _, value := range []string{"203.0.113.9", "GET", "404", "demo.example/missing"} {
+		if !strings.Contains(stdout.String(), value) {
+			t.Fatalf("request output %q does not contain %q", stdout.String(), value)
+		}
 	}
 }
 

@@ -19,6 +19,7 @@ func TestHTTPMonitorForwardsAndLogsRequest(t *testing.T) {
 	requestSeen := make(chan *http.Request, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		requestSeen <- request.Clone(request.Context())
+		writer.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(writer, "hello")
 	}))
 	defer upstream.Close()
@@ -61,7 +62,7 @@ func TestHTTPMonitorForwardsAndLogsRequest(t *testing.T) {
 		t.Fatal("upstream did not receive request")
 	}
 	logLine := output.String()
-	for _, value := range []string{"203.0.113.9", "POST", "demo.tunnel.nodelane.net/api/items?q=one"} {
+	for _, value := range []string{"203.0.113.9", "POST", "201", "demo.tunnel.nodelane.net/api/items?q=one"} {
 		if !strings.Contains(logLine, value) {
 			t.Errorf("request log %q does not contain %q", logLine, value)
 		}
@@ -76,6 +77,25 @@ func TestExpectedForwardingErrorRecognizesNormalShutdown(t *testing.T) {
 	}
 	if expectedForwardingError(errors.New("connection refused")) {
 		t.Fatal("connection refusal was treated as normal shutdown")
+	}
+}
+
+func TestStatusResponseWriterReportsFinalStatusAfterInformationalResponse(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	var statuses []int
+	writer := &statusResponseWriter{
+		ResponseWriter: recorder,
+		onStatus:       func(statusCode int) { statuses = append(statuses, statusCode) },
+	}
+	writer.WriteHeader(http.StatusEarlyHints)
+	writer.WriteHeader(http.StatusNoContent)
+	writer.WriteHeader(http.StatusInternalServerError)
+
+	if len(statuses) != 1 || statuses[0] != http.StatusNoContent {
+		t.Fatalf("reported statuses = %v, want [%d]", statuses, http.StatusNoContent)
+	}
+	if unwrapped := writer.Unwrap(); unwrapped != recorder {
+		t.Fatal("status writer did not expose its underlying response writer")
 	}
 }
 
@@ -132,6 +152,9 @@ func TestHTTPMonitorDeduplicatesFailuresUntilServiceRecovers(t *testing.T) {
 
 	request(http.StatusBadGateway)
 	request(http.StatusBadGateway)
+	if got := strings.Count(output.String(), "502"); got != 2 {
+		t.Fatalf("logged 502 responses = %d, want 2; output: %q", got, output.String())
+	}
 	if got := strings.Count(output.String(), "WARN"); got != 1 {
 		t.Fatalf("warnings before recovery = %d, want 1; output: %q", got, output.String())
 	}

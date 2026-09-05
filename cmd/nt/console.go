@@ -19,6 +19,8 @@ import (
 
 type consoleStyles struct {
 	brand        lipgloss.Style
+	brandMiddle  lipgloss.Style
+	brandAccent  lipgloss.Style
 	step         lipgloss.Style
 	success      lipgloss.Style
 	warning      lipgloss.Style
@@ -35,6 +37,8 @@ type consoleStyles struct {
 func newConsoleStyles() consoleStyles {
 	return consoleStyles{
 		brand:        lipgloss.NewStyle().Foreground(lipgloss.BrightCyan).Bold(true),
+		brandMiddle:  lipgloss.NewStyle().Foreground(lipgloss.BrightBlue).Bold(true),
+		brandAccent:  lipgloss.NewStyle().Foreground(lipgloss.BrightMagenta).Bold(true),
 		step:         lipgloss.NewStyle().Foreground(lipgloss.BrightCyan).Bold(true),
 		success:      lipgloss.NewStyle().Foreground(lipgloss.BrightGreen).Bold(true),
 		warning:      lipgloss.NewStyle().Foreground(lipgloss.BrightYellow).Bold(true),
@@ -58,6 +62,7 @@ type consoleUI struct {
 	localizer   localizer
 	mu          sync.Mutex
 	statusSet   bool
+	bannerSet   bool
 	warnings    map[string]struct{}
 }
 
@@ -204,8 +209,26 @@ func (ui *consoleUI) failure(message string) {
 func (ui *consoleUI) banner() {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
+	if ui.bannerSet {
+		return
+	}
+	ui.bannerSet = true
 	ui.clearStatusLocked()
-	_, _ = fmt.Fprintln(ui.out, ui.styles.brand.Render("NodeLane Tunnel"))
+	lines := []struct {
+		style lipgloss.Style
+		text  string
+	}{
+		{ui.styles.brand, ` _   _ _____`},
+		{ui.styles.brand, `| \ | |_   _|`},
+		{ui.styles.brandMiddle, `|  \| | | |`},
+		{ui.styles.brandMiddle, `| |\  | | |`},
+		{ui.styles.brandAccent, `|_| \_| |_|`},
+	}
+	for _, line := range lines {
+		_, _ = fmt.Fprintln(ui.out, line.style.Render(line.text))
+	}
+	_, _ = fmt.Fprintln(ui.out, ui.styles.brandAccent.Render("NodeLane Tunnel"))
+	_, _ = fmt.Fprintln(ui.out, ui.styles.muted.Render(ui.text(msgDirectCommandHint)))
 }
 
 func (ui *consoleUI) detail(label, value string) {
@@ -226,7 +249,7 @@ func (ui *consoleUI) instruction(message string) {
 	_, _ = fmt.Fprintf(ui.out, "\n%s\n", ui.styles.warning.Render(message))
 }
 
-func (ui *consoleUI) request(at time.Time, ip, method, address string) {
+func (ui *consoleUI) request(at time.Time, ip, method string, statusCode int, address string) {
 	ui.mu.Lock()
 	defer ui.mu.Unlock()
 	ui.clearStatusLocked()
@@ -240,10 +263,20 @@ func (ui *consoleUI) request(at time.Time, ip, method, address string) {
 	case "DELETE":
 		methodStyle = ui.styles.methodDelete
 	}
-	_, _ = fmt.Fprintf(ui.out, "%s  %s  %s  %s\n",
+	statusStyle := ui.styles.success
+	switch {
+	case statusCode >= 500:
+		statusStyle = ui.styles.failure
+	case statusCode >= 400:
+		statusStyle = ui.styles.warning
+	case statusCode >= 300:
+		statusStyle = ui.styles.step
+	}
+	_, _ = fmt.Fprintf(ui.out, "%s  %s  %s  %s  %s\n",
 		ui.styles.muted.Render(at.Local().Format("2006-01-02 15:04:05")),
 		ui.styles.step.Render(fmt.Sprintf("%-39s", ip)),
 		methodStyle.Render(fmt.Sprintf("%-7s", method)),
+		statusStyle.Render(fmt.Sprintf("%3d", statusCode)),
 		address,
 	)
 }

@@ -2,7 +2,7 @@ name: release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["nt-v*"]
 
 permissions:
   contents: write
@@ -32,6 +32,15 @@ jobs:
           go-version: "1.27.x"
           cache: true
 
+      - name: Verify client release version
+        run: |
+          version="${GITHUB_REF_NAME#nt-v}"
+          pinned_version=$(tr -d '\r\n' < client-version.txt)
+          if [ "$version" != "$pinned_version" ]; then
+            echo "Client tag version $version does not match client-version.txt ($pinned_version)." >&2
+            exit 1
+          fi
+
       - name: Build nt
         env:
           GOOS: ${{ matrix.goos }}
@@ -41,7 +50,7 @@ jobs:
           mkdir -p package
           suffix=""
           if [ "$GOOS" = "windows" ]; then suffix=".exe"; fi
-          go build -trimpath -ldflags="-s -w -X github.com/Wy2926/nodelane-tunneld/internal/client.Version=${GITHUB_REF_NAME#v}" -o "package/nt${suffix}" ./cmd/nt
+          go build -trimpath -ldflags="-s -w -X github.com/Wy2926/nodelane-tunneld/internal/client.Version=${GITHUB_REF_NAME#nt-v}" -o "package/nt${suffix}" ./cmd/nt
 
       - name: Add frp license
         run: |
@@ -51,7 +60,7 @@ jobs:
       - name: Package
         id: package
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${GITHUB_REF_NAME#nt-v}"
           name="nt_${version}_${{ matrix.goos }}_${{ matrix.goarch }}.${{ matrix.archive }}"
           if [ "${{ matrix.archive }}" = "zip" ]; then
             (cd package && zip -q -r "../${name}" .)

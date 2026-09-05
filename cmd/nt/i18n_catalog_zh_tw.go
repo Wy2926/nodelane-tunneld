@@ -2,6 +2,7 @@ package main
 
 var catalogZhTW = map[messageID]string{
 	msgStatusOK: "成功", msgStatusWarning: "警告", msgStatusError: "錯誤",
+	msgDirectCommandHint:       "下次直接執行 nt 即可，一行指令就能使用。",
 	msgUsage:                   "用法: nt [--lang 語言] [http|tcp|udp] [本機位址] [本機連接埠]",
 	msgHelpDescription:         "不帶參數執行時，nt 會依序詢問協定、本機位址和連接埠；本機位址預設為 localhost。",
 	msgHelpLanguage:            "使用 --lang 語言 設定顯示語言；執行「nt languages」查看語言清單。",
@@ -29,7 +30,7 @@ var catalogZhTW = map[messageID]string{
 	msgConnectTimeout: "內建 frp 用戶端未能在 12 秒內連線\n%s", msgFRPStoppedUnexpectedly: "內建 frp 用戶端意外停止",
 	msgFRPStopped: "內建 frp 用戶端已停止：%v\n%s", msgTunnelConnected: "隧道連線成功",
 	msgClientLabel: "用戶端", msgLocalAddressLabel: "本機位址", msgPublicAddressLabel: "公網位址", msgExpiresAtLabel: "到期時間",
-	msgHTTPRequestInstruction: "HTTP 請求記錄  ·  時間 / IP / 方法 / 位址  ·  Ctrl+C 停止",
+	msgHTTPRequestInstruction: "HTTP 請求記錄  ·  時間 / IP / 方法 / 狀態碼 / 位址  ·  Ctrl+C 停止",
 	msgTrafficInstruction:     "即時流量  ·  接收: 公網 → 本機 / 傳送: 本機 → 公網  ·  Ctrl+C 停止",
 	msgTrafficStats:           "目前連線 %s  累計 %s  接收 %s  傳送 %s", msgUnsupportedMonitorProtocol: "不支援監控協定 %q",
 	msgStartHTTPMonitorFailed: "啟動 HTTP 請求監控：%v", msgHTTPServiceUnavailable: "本機 HTTP 服務無法使用：%v",

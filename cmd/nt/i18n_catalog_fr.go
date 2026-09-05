@@ -2,6 +2,7 @@ package main
 
 var catalogFR = map[messageID]string{
 	msgStatusOK: "OK", msgStatusWarning: "AVERT.", msgStatusError: "ERREUR",
+	msgDirectCommandHint:       "La prochaine fois, exécutez nt ; une seule commande suffit.",
 	msgUsage:                   "Utilisation : nt [--lang LANGUE] [http|tcp|udp] [adresse locale] [port local]",
 	msgHelpDescription:         "Sans argument, nt demande le protocole, l’adresse locale et le port. L’adresse locale est localhost par défaut.",
 	msgHelpLanguage:            "Utilisez --lang LANGUE pour choisir la langue ; lancez « nt languages » pour afficher la liste.",
@@ -29,7 +30,7 @@ var catalogFR = map[messageID]string{
 	msgConnectTimeout: "le client frp intégré ne s’est pas connecté sous 12 secondes\n%s", msgFRPStoppedUnexpectedly: "le client frp intégré s’est arrêté inopinément",
 	msgFRPStopped: "le client frp intégré s’est arrêté : %v\n%s", msgTunnelConnected: "Tunnel connecté",
 	msgClientLabel: "Client", msgLocalAddressLabel: "Adresse locale", msgPublicAddressLabel: "Adresse publique", msgExpiresAtLabel: "Expiration",
-	msgHTTPRequestInstruction: "Journal HTTP  ·  heure / IP / méthode / adresse  ·  Ctrl+C pour arrêter",
+	msgHTTPRequestInstruction: "Journal HTTP  ·  heure / IP / méthode / statut / adresse  ·  Ctrl+C pour arrêter",
 	msgTrafficInstruction:     "Trafic en direct  ·  reçu : public → local / envoyé : local → public  ·  Ctrl+C pour arrêter",
 	msgTrafficStats:           "actives %s  total %s  reçu %s  envoyé %s", msgUnsupportedMonitorProtocol: "protocole de surveillance non pris en charge %q",
 	msgStartHTTPMonitorFailed: "démarrer la surveillance HTTP : %v", msgHTTPServiceUnavailable: "Service HTTP local indisponible : %v",

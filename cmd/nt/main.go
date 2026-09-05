@@ -36,6 +36,7 @@ func run(ui *consoleUI) error {
 		return nil
 	}
 	if len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
+		ui.banner()
 		fmt.Fprintln(ui.out, ui.text(msgUsage))
 		fmt.Fprintln(ui.out, ui.text(msgHelpDescription))
 		fmt.Fprintln(ui.out, ui.text(msgHelpLanguage))
@@ -43,10 +44,12 @@ func run(ui *consoleUI) error {
 		return nil
 	}
 	if len(args) == 1 && args[0] == "languages" {
+		ui.banner()
 		fmt.Fprintf(ui.out, "%s: %s\n", ui.text(msgSupportedLanguages), supportedLocaleList())
 		return nil
 	}
 
+	ui.banner()
 	values, interactive, err := prepareTarget(args, ui)
 	if err != nil {
 		return err

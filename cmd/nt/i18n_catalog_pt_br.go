@@ -2,6 +2,7 @@ package main
 
 var catalogPtBR = map[messageID]string{
 	msgStatusOK: "OK", msgStatusWarning: "AVISO", msgStatusError: "ERRO",
+	msgDirectCommandHint:       "Na próxima vez, execute nt; um único comando é suficiente.",
 	msgUsage:                   "Uso: nt [--lang IDIOMA] [http|tcp|udp] [endereço local] [porta local]",
 	msgHelpDescription:         "Sem argumentos, o nt solicita o protocolo, o endereço local e a porta. O endereço local padrão é localhost.",
 	msgHelpLanguage:            "Use --lang IDIOMA para escolher o idioma; execute “nt languages” para ver a lista.",
@@ -29,7 +30,7 @@ var catalogPtBR = map[messageID]string{
 	msgConnectTimeout: "o cliente frp integrado não se conectou em 12 segundos\n%s", msgFRPStoppedUnexpectedly: "o cliente frp integrado parou inesperadamente",
 	msgFRPStopped: "o cliente frp integrado parou: %v\n%s", msgTunnelConnected: "Túnel conectado",
 	msgClientLabel: "Cliente", msgLocalAddressLabel: "Endereço local", msgPublicAddressLabel: "Endereço público", msgExpiresAtLabel: "Expira em",
-	msgHTTPRequestInstruction: "Log HTTP  ·  hora / IP / método / endereço  ·  Ctrl+C para parar",
+	msgHTTPRequestInstruction: "Log HTTP  ·  hora / IP / método / status / endereço  ·  Ctrl+C para parar",
 	msgTrafficInstruction:     "Tráfego ao vivo  ·  recebido: público → local / enviado: local → público  ·  Ctrl+C para parar",
 	msgTrafficStats:           "ativas %s  total %s  recebido %s  enviado %s", msgUnsupportedMonitorProtocol: "protocolo de monitoramento não compatível %q",
 	msgStartHTTPMonitorFailed: "iniciar monitor HTTP: %v", msgHTTPServiceUnavailable: "Serviço HTTP local indisponível: %v",

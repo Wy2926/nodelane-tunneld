@@ -2,6 +2,7 @@ package main
 
 var catalogHI = map[messageID]string{
 	msgStatusOK: "ठीक", msgStatusWarning: "चेतावनी", msgStatusError: "त्रुटि",
+	msgDirectCommandHint:       "अगली बार केवल nt चलाएँ—एक ही कमांड पर्याप्त है।",
 	msgUsage:                   "उपयोग: nt [--lang भाषा] [http|tcp|udp] [लोकल पता] [लोकल पोर्ट]",
 	msgHelpDescription:         "बिना आर्ग्युमेंट चलाने पर nt प्रोटोकॉल, लोकल पता और पोर्ट पूछता है। लोकल पते का डिफ़ॉल्ट localhost है।",
 	msgHelpLanguage:            "भाषा चुनने के लिए --lang भाषा दें; सूची के लिए ‘nt languages’ चलाएँ।",
@@ -29,7 +30,7 @@ var catalogHI = map[messageID]string{
 	msgConnectTimeout: "अंतर्निहित frp क्लाइंट 12 सेकंड में कनेक्ट नहीं हुआ\n%s", msgFRPStoppedUnexpectedly: "अंतर्निहित frp क्लाइंट अप्रत्याशित रूप से रुक गया",
 	msgFRPStopped: "अंतर्निहित frp क्लाइंट रुक गया: %v\n%s", msgTunnelConnected: "टनल कनेक्ट हो गई",
 	msgClientLabel: "क्लाइंट", msgLocalAddressLabel: "लोकल पता", msgPublicAddressLabel: "सार्वजनिक पता", msgExpiresAtLabel: "समाप्ति समय",
-	msgHTTPRequestInstruction: "HTTP अनुरोध लॉग  ·  समय / IP / विधि / पता  ·  रोकने के लिए Ctrl+C",
+	msgHTTPRequestInstruction: "HTTP अनुरोध लॉग  ·  समय / IP / विधि / स्थिति / पता  ·  रोकने के लिए Ctrl+C",
 	msgTrafficInstruction:     "लाइव ट्रैफ़िक  ·  प्राप्त: सार्वजनिक → लोकल / भेजा: लोकल → सार्वजनिक  ·  रोकने के लिए Ctrl+C",
 	msgTrafficStats:           "सक्रिय %s  कुल %s  प्राप्त %s  भेजा %s", msgUnsupportedMonitorProtocol: "असमर्थित मॉनिटर प्रोटोकॉल %q",
 	msgStartHTTPMonitorFailed: "HTTP मॉनिटर शुरू करें: %v", msgHTTPServiceUnavailable: "लोकल HTTP सेवा उपलब्ध नहीं है: %v",
