@@ -854,6 +854,80 @@ func TestControlRunInvalidInputsAndWrongPepperFailClosed(t *testing.T) {
 	}
 }
 
+func TestControlRunIPClassificationUsesNormalizedAddress(t *testing.T) {
+	for _, operation := range []string{"account start", "launch redeem", "online evidence"} {
+		for _, tc := range []struct {
+			name, address string
+			valid         bool
+		}{
+			{"mapped unspecified", "::ffff:0.0.0.0", false},
+			{"valid mapped", "::ffff:192.0.2.15", true},
+			{"mapped multicast", "::ffff:224.0.0.1", false},
+			{"zoned IPv6", "fe80::1%eth0", false},
+			{"zoned mapped", "::ffff:192.0.2.15%eth0", false},
+		} {
+			t.Run(operation+"/"+tc.name, func(t *testing.T) {
+				h := newControlRunHarness(t)
+				address := netip.MustParseAddr(tc.address)
+				var observed netip.Addr
+				var err error
+				wantError := domain.ErrInvalidRequest
+				switch operation {
+				case "account start":
+					cmd := h.startCommand("normalized-IP")
+					cmd.RequestIP = address
+					var result domain.StartResult
+					result, err = h.api.StartAccountRun(context.Background(), cmd)
+					observed = result.Run.RequestIP
+					if !tc.valid {
+						requireControlZeroStart(t, result, err)
+						requireControlCounts(t, h.fixture.DB, 0, 0, 0)
+					}
+				case "launch redeem":
+					cmd := h.launch(t)
+					cmd.RequestIP = address
+					var result domain.StartResult
+					result, err = h.api.RedeemLaunchCode(context.Background(), cmd)
+					observed = result.Run.RequestIP
+					if !tc.valid {
+						requireControlZeroStart(t, result, err)
+						requireControlCounts(t, h.fixture.DB, 0, 0, 0)
+						var redeemed sql.NullTime
+						if scanErr := h.fixture.DB.QueryRow(`SELECT redeemed_at FROM route_launch_codes`).Scan(&redeemed); scanErr != nil || redeemed.Valid {
+							t.Fatalf("invalid source IP consumed launch code: redeemed=%t err=%v", redeemed.Valid, scanErr)
+						}
+					}
+				case "online evidence":
+					first := h.start(t, "normalized-IP-evidence")
+					var result domain.Run
+					result, err = h.api.ConfirmOnline(context.Background(), domain.RunRegistrationEvidence{
+						RunID: first.Run.ID, RouteID: h.route.ID, ProxyName: h.route.ID,
+						ObservedOnline: true, ConnectedIP: address,
+					})
+					observed = result.ConnectedIP
+					wantError = domain.ErrRunEvidenceInvalid
+					if !tc.valid {
+						if !reflect.DeepEqual(result, domain.Run{}) {
+							t.Fatal("invalid connected IP returned a run")
+						}
+						authorized, authErr := h.api.AuthorizeRun(context.Background(), controlProof(first))
+						if authErr != nil || authorized.Run.Status != domain.RunStarting || authorized.Run.ConnectedIP.IsValid() {
+							t.Fatalf("invalid evidence changed starting state: status=%s err=%v", authorized.Run.Status, authErr)
+						}
+					}
+				}
+				if tc.valid {
+					if err != nil || observed != netip.MustParseAddr("192.0.2.15") {
+						t.Fatalf("valid mapped IP was not normalized: address=%v err=%v", observed, err)
+					}
+				} else if !errors.Is(err, wantError) {
+					t.Fatalf("invalid IP error=%v want=%v", err, wantError)
+				}
+			})
+		}
+	}
+}
+
 func TestControlRunReplayUsesVerifiedCanonicalAccountPrincipal(t *testing.T) {
 	h := newControlRunHarness(t)
 	const owner = "a0000000-0000-4000-8000-000000000001"

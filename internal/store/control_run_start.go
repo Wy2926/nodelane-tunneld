@@ -240,5 +240,9 @@ func validControlRunKey(key string) bool {
 }
 
 func validControlRunIP(ip netip.Addr) bool {
-	return ip.IsValid() && ip.Zone() == "" && !ip.IsUnspecified() && !ip.IsMulticast()
+	if !ip.IsValid() || ip.Zone() != "" {
+		return false
+	}
+	ip = ip.Unmap()
+	return !ip.IsUnspecified() && !ip.IsMulticast()
 }
