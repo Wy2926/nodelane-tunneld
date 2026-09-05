@@ -77,6 +77,8 @@ type SweepResult struct {
 
 `RunRegistrationEvidence` and `RunDisconnectEvidence` are trusted internal coordinator inputs, not public DTOs or proof supplied by a client. The later frps adapter is responsible for obtaining verified native observations. A normal close notification alone must not finalize a still-running, unexpired reconnectable run.
 
+`RequestIP` is validated transport metadata, not part of an idempotency request fingerprint. Initial commit records it; retries from a different valid source IP recover the original response, including its original IP and deadlines. The current account-start fingerprint contains the resolved route ID; launch redemption contains the resolved code ID and route ID. Keys/nonces are hashed separately, and bearer secrets never enter the request payload. Future operation-affecting fields must join the typed fingerprint. Each request still requires current authentication/ownership checks.
+
 Additional domain sentinels in `control_storage_errors.go`: `ErrRouteNotFound`, `ErrRouteDeleted`, `ErrSubdomainConflict`, `ErrRunAlreadyActive`, `ErrRunStopped`, `ErrLaunchCodeExpired`, `ErrLaunchCodeUsed`, `ErrLaunchCodeRevoked`, `ErrIdempotencyConflict`, `ErrInvalidRunProof`, `ErrRunEvidenceInvalid`. Reuse existing foundation errors where appropriate.
 
 ## Task 1: Fresh Migrations, Constructor, and Isolated DB Tests
@@ -269,7 +271,7 @@ func (p *ControlPostgres) Sweep(ctx context.Context, limit int) (domain.SweepRes
 
 - [ ] **Step 1: Write failing real-DB concurrency and expiry tests.**
 
-Require one successful concurrent start per route, code not consumed on active-slot conflict, and no usable result on a failed transaction. For launch replay, verify the complete secret again, distinguish same nonce/body from different nonce/body, recover the same credential after discarding the original response and reopening the store, and reject expired/corrupt/swapped replay metadata. Include redemption near code expiry: its valid committed two-minute replay may outlive initial code expiry but cannot outlive its own expiry or current run validity.
+Require one successful concurrent start per route, code not consumed on active-slot conflict, and no usable result on a failed transaction. For launch replay, verify the complete secret again, distinguish the same nonce from a different nonce, recover the same credential after discarding the original response and reopening the store, and reject expired/corrupt/swapped replay metadata. Changed valid transport IP must preserve the original replay. The current launch body has no additional operation-affecting field; verify changed request hashes/associations through tamper rejection, without inventing a body parameter. Account-start same-key/different-route requests must conflict. Include redemption near code expiry: its valid committed two-minute replay may outlive initial code expiry but cannot outlive its own expiry or current run validity.
 
 Test account-start replay with current ownership, exact connection/lease boundaries, expired-but-unswept credentials, wrong run/token namespace, starting heartbeats not extending first-connect deadline, established heartbeats extending only valid leases, stop/delete versus replay races, repeated stops, late evidence, and cleanup retention. Raw SQL confirms only hashes and ciphertext are stored, with no raw token in text/bytea fields.
 
