@@ -110,6 +110,48 @@ func TestControlMigrationSerializesConcurrentInitializers(t *testing.T) {
 	}
 }
 
+func TestControlMigrationPreflightUsesOneSnapshotAcrossConcurrentInitialization(t *testing.T) {
+	fixture := newControlTestFixture(t)
+	ctx := context.Background()
+	preflight, err := fixture.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer preflight.Rollback()
+
+	var businessTables int
+	if err := preflight.QueryRowContext(ctx, `
+		SELECT count(*) FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = current_schema() AND c.relname = ANY($1)`, controlTableNames).Scan(&businessTables); err != nil {
+		t.Fatal(err)
+	}
+	if businessTables != 0 {
+		t.Fatalf("fresh snapshot has %d business tables", businessTables)
+	}
+
+	initialized := make(chan error, 1)
+	go func() { initialized <- MigrateControlDatabase(ctx, fixture.DB) }()
+	select {
+	case err := <-initialized:
+		if err != nil {
+			t.Fatalf("concurrent initializer: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("concurrent initializer blocked behind read-only preflight")
+	}
+
+	if err := validateControlSchemaStateInSnapshot(ctx, preflight); err != nil {
+		t.Fatalf("coherent preflight snapshot reported partial schema: %v", err)
+	}
+	if err := preflight.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateControlDatabase(ctx, fixture.DB); err != nil {
+		t.Fatalf("initializer after concurrent migration: %v", err)
+	}
+}
+
 func TestControlMigrationRefusesLegacySchemaWithoutChangingRows(t *testing.T) {
 	for _, table := range []string{"clients", "client_tokens", "tunnels"} {
 		t.Run(table, func(t *testing.T) {
@@ -244,24 +286,29 @@ func TestControlSchemaEnforcesRouteAndRunUniqueness(t *testing.T) {
 	_, db := newControlTestStore(t)
 	account, route := seedControlAccountRoute(t, db)
 	now := route.CreatedAt
-	assertControlInsertFails(t, db, `INSERT INTO tunnel_routes (id, account_id, protocol, subdomain, proxy_name, status, created_at, updated_at) VALUES ('rte_bbbbbbbbbbbbbbbbbbbbbbbbbb',$1,'http','demo-route','rte_bbbbbbbbbbbbbbbbbbbbbbbbbb','active',$2,$2)`, account.ID, now)
+	assertControlConstraintError(t, db, "23505", "control_routes_unreleased_name_uq", `INSERT INTO tunnel_routes (id, account_id, protocol, subdomain, proxy_name, status, created_at, updated_at) VALUES ('rte_bbbbbbbbbbbbbbbbbbbbbbbbbb',$1,'http','demo-route','rte_bbbbbbbbbbbbbbbbbbbbbbbbbb','active',$2,$2)`, account.ID, now)
 	if _, err := db.Exec(`UPDATE tunnel_routes SET status='deleted', deleted_at=$2, recoverable_until=$2, name_released_at=$2, updated_at=$2 WHERE id=$1`, route.ID, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO tunnel_routes (id, account_id, protocol, subdomain, proxy_name, status, created_at, updated_at) VALUES ('rte_bbbbbbbbbbbbbbbbbbbbbbbbbb',$1,'http','demo-route','rte_bbbbbbbbbbbbbbbbbbbbbbbbbb','active',$2,$2)`, account.ID, now); err != nil {
 		t.Fatalf("released name was not reusable: %v", err)
 	}
-	assertControlInsertFails(t, db, `INSERT INTO tunnel_routes (id, account_id, protocol, subdomain, proxy_name, status, created_at, updated_at) VALUES ('rte_ccccccccccccccccccccccccccc',$1,'http','fresh-label','wrong-proxy','active',$2,$2)`, account.ID, now)
-	assertControlInsertFails(t, db, `INSERT INTO tunnel_routes (id, account_id, protocol, subdomain, proxy_name, status, created_at, updated_at) VALUES ('rte_ccccccccccccccccccccccccccc',$1,'tcp','fresh-label','rte_ccccccccccccccccccccccccccc','active',$2,$2)`, account.ID, now)
-	assertControlInsertFails(t, db, `INSERT INTO tunnel_routes (id, account_id, protocol, subdomain, proxy_name, status, created_at, updated_at) VALUES ('rte_ccccccccccccccccccccccccccc',$1,'http','anon-blocked','rte_ccccccccccccccccccccccccccc','active',$2,$2)`, account.ID, now)
-	assertControlInsertFails(t, db, `INSERT INTO tunnel_routes (id, account_id, protocol, subdomain, proxy_name, status, created_at, updated_at) VALUES ('rte_ccccccccccccccccccccccccccc',$1,'http','fresh-label','rte_ccccccccccccccccccccccccccc','invalid',$2,$2)`, account.ID, now)
+	const validRouteID = "rte_abcdefghijklmnopqrstuvwxyz"
+	assertControlConstraintError(t, db, "23514", "tunnel_routes_check", `INSERT INTO tunnel_routes (id, account_id, protocol, subdomain, proxy_name, status, created_at, updated_at) VALUES ($1,$2,'http','fresh-label','wrong-proxy','active',$3,$3)`, validRouteID, account.ID, now)
+	assertControlConstraintError(t, db, "23514", "tunnel_routes_protocol_check", `INSERT INTO tunnel_routes (id, account_id, protocol, subdomain, proxy_name, status, created_at, updated_at) VALUES ($1,$2,'tcp','fresh-label',$1,'active',$3,$3)`, validRouteID, account.ID, now)
+	assertControlConstraintError(t, db, "23514", "tunnel_routes_subdomain_check", `INSERT INTO tunnel_routes (id, account_id, protocol, subdomain, proxy_name, status, created_at, updated_at) VALUES ($1,$2,'http','anon-blocked',$1,'active',$3,$3)`, validRouteID, account.ID, now)
+	assertControlConstraintError(t, db, "23514", "control_routes_status_check", `INSERT INTO tunnel_routes (id, account_id, protocol, subdomain, proxy_name, status, created_at, updated_at) VALUES ($1,$2,'http','fresh-label',$1,'invalid',$3,$3)`, validRouteID, account.ID, now)
 
 	activeRoute := "rte_bbbbbbbbbbbbbbbbbbbbbbbbbb"
 	insertRun := `INSERT INTO tunnel_runs (id, route_id, started_via, status, desired_state, request_ip, created_at, connect_deadline_at) VALUES ($1,$2,'device_login',$3,'running','192.0.2.1',$4,$5)`
 	if _, err := db.Exec(insertRun, "run_aaaaaaaaaaaaaaaaaaaaaaaaaa", activeRoute, "starting", now, now.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	assertControlInsertFails(t, db, insertRun, "run_bbbbbbbbbbbbbbbbbbbbbbbbbb", activeRoute, "online", now, now.Add(2*time.Minute))
+	assertControlConstraintError(t, db, "23505", "control_runs_active_route_uq", `
+		INSERT INTO tunnel_runs
+		(id, route_id, started_via, status, desired_state, request_ip, connected_ip, created_at, connected_at, connect_deadline_at, lease_expires_at)
+		VALUES ($1,$2,'device_login','online','running','192.0.2.2','192.0.2.3',$3,$3,$4,$5)`,
+		"run_bbbbbbbbbbbbbbbbbbbbbbbbbb", activeRoute, now, now.Add(2*time.Minute), now.Add(90*time.Second))
 	if _, err := db.Exec(`UPDATE tunnel_runs SET status='offline', desired_state='stopped', stopped_at=$2 WHERE id=$1`, "run_aaaaaaaaaaaaaaaaaaaaaaaaaa", now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
@@ -278,9 +325,9 @@ func TestControlSchemaEnforcesHashesReplayKeysAndTimestampRelationships(t *testi
 	if _, err := db.Exec(`INSERT INTO operation_replays (id, operation, principal_key, key_hash, request_hash, route_id, response_ciphertext, created_at, expires_at) VALUES ('rpl_aaaaaaaaaaaaaaaaaaaaaaaaaa','create_route','principal',$1,$1,$2,'x',$3,$4)`, hash, route.ID, now, now.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	assertControlInsertFails(t, db, `INSERT INTO operation_replays (id, operation, principal_key, key_hash, request_hash, route_id, response_ciphertext, created_at, expires_at) VALUES ('rpl_bbbbbbbbbbbbbbbbbbbbbbbbbb','create_route','principal',$1,$1,$2,'x',$3,$4)`, hash, route.ID, now, now.Add(2*time.Minute))
-	assertControlInsertFails(t, db, `INSERT INTO route_launch_codes (id, route_id, secret_hash, created_at, expires_at) VALUES ('nlc_aaaaaaaaaaaaaaaaaaaaaaaaaa',$1,$2,$3,$3)`, route.ID, strings.Repeat("A", 64), now)
-	assertControlInsertFails(t, db, `INSERT INTO route_launch_codes (id, route_id, secret_hash, created_at, expires_at) VALUES ('nlc_aaaaaaaaaaaaaaaaaaaaaaaaaa',$1,$2,$3,$3)`, route.ID, hash, now)
+	assertControlConstraintError(t, db, "23505", "control_replay_key_uq", `INSERT INTO operation_replays (id, operation, principal_key, key_hash, request_hash, route_id, response_ciphertext, created_at, expires_at) VALUES ('rpl_bbbbbbbbbbbbbbbbbbbbbbbbbb','create_route','principal',$1,$1,$2,'x',$3,$4)`, hash, route.ID, now, now.Add(2*time.Minute))
+	assertControlConstraintError(t, db, "23514", "route_launch_codes_secret_hash_check", `INSERT INTO route_launch_codes (id, route_id, secret_hash, created_at, expires_at) VALUES ('nlc_aaaaaaaaaaaaaaaaaaaaaaaaaa',$1,$2,$3,$4)`, route.ID, strings.Repeat("A", 64), now, now.Add(time.Minute))
+	assertControlConstraintError(t, db, "23514", "route_launch_codes_check", `INSERT INTO route_launch_codes (id, route_id, secret_hash, created_at, expires_at) VALUES ('nlc_aaaaaaaaaaaaaaaaaaaaaaaaaa',$1,$2,$3,$3)`, route.ID, hash, now)
 }
 
 func TestControlTransactionRetriesOnlyRetryableSQLStates(t *testing.T) {
@@ -404,9 +451,14 @@ func TestControlDigestsAreStableTypedJSONAndClockIsUTCMicroseconds(t *testing.T)
 	}
 }
 
-func assertControlInsertFails(t *testing.T, db *sql.DB, query string, args ...any) {
+func assertControlConstraintError(t *testing.T, db *sql.DB, sqlState, constraint string, query string, args ...any) {
 	t.Helper()
-	if _, err := db.Exec(query, args...); err == nil {
-		t.Fatalf("constraint accepted invalid row: %s", query)
+	_, err := db.Exec(query, args...)
+	var postgresError *pgconn.PgError
+	if !errors.As(err, &postgresError) {
+		t.Fatalf("constraint error=%v, want PostgreSQL %s from %s", err, sqlState, constraint)
+	}
+	if postgresError.Code != sqlState || postgresError.ConstraintName != constraint {
+		t.Fatalf("constraint error SQLSTATE=%s constraint=%q, want %s %q: %v", postgresError.Code, postgresError.ConstraintName, sqlState, constraint, err)
 	}
 }

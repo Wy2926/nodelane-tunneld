@@ -55,7 +55,27 @@ func newControlMigrationProvider(db *sql.DB) (*goose.Provider, error) {
 }
 
 func validateControlSchemaState(ctx context.Context, db *sql.DB) error {
-	rows, err := db.QueryContext(ctx, `
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("begin control schema inspection: %w", err)
+	}
+	defer tx.Rollback()
+	if err := validateControlSchemaStateInSnapshot(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("finish control schema inspection: %w", err)
+	}
+	return nil
+}
+
+type controlSchemaQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func validateControlSchemaStateInSnapshot(ctx context.Context, queryer controlSchemaQueryer) error {
+	rows, err := queryer.QueryContext(ctx, `
 		SELECT c.relname
 		FROM pg_catalog.pg_class c
 		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -81,7 +101,7 @@ func validateControlSchemaState(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("inspect control schema: %w", err)
 	}
 	var unsupported bool
-	if err := db.QueryRowContext(ctx, `
+	if err := queryer.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM pg_catalog.pg_proc p
 			JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
@@ -98,7 +118,7 @@ func validateControlSchemaState(ctx context.Context, db *sql.DB) error {
 	}
 	sort.Strings(tables)
 	if len(tables) == 0 {
-		version, exists, err := currentControlVersion(ctx, db)
+		version, exists, err := currentControlVersion(ctx, queryer)
 		if err != nil {
 			return err
 		}
@@ -110,7 +130,7 @@ func validateControlSchemaState(ctx context.Context, db *sql.DB) error {
 	if !equalControlTables(tables, controlTableNames) {
 		return fmt.Errorf("refuse non-fresh or partial control schema: found %v", tables)
 	}
-	version, exists, err := currentControlVersion(ctx, db)
+	version, exists, err := currentControlVersion(ctx, queryer)
 	if err != nil {
 		return err
 	}
@@ -120,9 +140,9 @@ func validateControlSchemaState(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func currentControlVersion(ctx context.Context, db *sql.DB) (int64, bool, error) {
+func currentControlVersion(ctx context.Context, queryer controlSchemaQueryer) (int64, bool, error) {
 	var exists bool
-	if err := db.QueryRowContext(ctx, `
+	if err := queryer.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM pg_catalog.pg_class c
 			JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -134,7 +154,7 @@ func currentControlVersion(ctx context.Context, db *sql.DB) (int64, bool, error)
 		return 0, false, nil
 	}
 	var version sql.NullInt64
-	if err := db.QueryRowContext(ctx, `SELECT max(version_id) FROM goose_db_version WHERE is_applied`).Scan(&version); err != nil {
+	if err := queryer.QueryRowContext(ctx, `SELECT max(version_id) FROM goose_db_version WHERE is_applied`).Scan(&version); err != nil {
 		return 0, true, fmt.Errorf("inspect control migration version: %w", err)
 	}
 	return version.Int64, true, nil

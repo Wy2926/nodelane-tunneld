@@ -48,7 +48,7 @@ CREATE TABLE tunnel_routes (
         AND subdomain NOT IN ('www','auth','api','admin','console','status','support','mail','smtp','frp','tunnel')
     ),
     proxy_name TEXT NOT NULL UNIQUE CHECK (proxy_name = id),
-    status TEXT NOT NULL CHECK (status IN ('active', 'deleted')),
+    status TEXT NOT NULL CONSTRAINT control_routes_status_check CHECK (status IN ('active', 'deleted')),
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL CHECK (updated_at >= created_at),
     deleted_at TIMESTAMPTZ NULL,
