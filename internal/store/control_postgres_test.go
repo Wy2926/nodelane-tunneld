@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/Wy2926/nodelane-tunneld/internal/domain"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 func TestControlMigrationInitializesFreshSchemaAndIsRepeatable(t *testing.T) {
@@ -112,44 +114,83 @@ func TestControlMigrationSerializesConcurrentInitializers(t *testing.T) {
 
 func TestControlMigrationPreflightUsesOneSnapshotAcrossConcurrentInitialization(t *testing.T) {
 	fixture := newControlTestFixture(t)
-	ctx := context.Background()
-	preflight, err := fixture.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := MigrateControlDatabase(ctx, fixture.DB); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.DB.ExecContext(ctx, `
+		DROP TABLE network_bans, operation_replays, run_credentials, tunnel_runs, route_launch_codes, tunnel_routes, tunnel_accounts CASCADE;
+		DELETE FROM goose_db_version;
+		INSERT INTO goose_db_version (version_id, is_applied, tstamp) VALUES (0, true, now())`); err != nil {
+		t.Fatal(err)
+	}
+
+	objectsRead := make(chan struct{})
+	releasePreflight := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releasePreflight) }) }
+	defer release()
+	config, err := pgx.ParseConfig(fixture.DSN)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer preflight.Rollback()
+	config.Tracer = &controlMigrationPauseTracer{objectsRead: objectsRead, release: releasePreflight}
+	initializerA := stdlib.OpenDB(*config)
+	initializerA.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = initializerA.Close() })
 
-	var businessTables int
-	if err := preflight.QueryRowContext(ctx, `
-		SELECT count(*) FROM pg_catalog.pg_class c
-		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = current_schema() AND c.relname = ANY($1)`, controlTableNames).Scan(&businessTables); err != nil {
-		t.Fatal(err)
-	}
-	if businessTables != 0 {
-		t.Fatalf("fresh snapshot has %d business tables", businessTables)
-	}
-
-	initialized := make(chan error, 1)
-	go func() { initialized <- MigrateControlDatabase(ctx, fixture.DB) }()
+	resultA := make(chan error, 1)
+	go func() { resultA <- MigrateControlDatabase(ctx, initializerA) }()
 	select {
-	case err := <-initialized:
-		if err != nil {
-			t.Fatalf("concurrent initializer: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("concurrent initializer blocked behind read-only preflight")
+	case <-objectsRead:
+	case <-ctx.Done():
+		t.Fatalf("initializer A did not finish its catalog read: %v", ctx.Err())
 	}
 
-	if err := validateControlSchemaStateInSnapshot(ctx, preflight); err != nil {
-		t.Fatalf("coherent preflight snapshot reported partial schema: %v", err)
-	}
-	if err := preflight.Rollback(); err != nil {
-		t.Fatal(err)
-	}
 	if err := MigrateControlDatabase(ctx, fixture.DB); err != nil {
-		t.Fatalf("initializer after concurrent migration: %v", err)
+		release()
+		t.Fatalf("initializer B: %v", err)
 	}
+	release()
+	select {
+	case err := <-resultA:
+		if err != nil {
+			t.Fatalf("initializer A after concurrent commit: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("initializer A did not complete: %v", ctx.Err())
+	}
+}
+
+type controlMigrationTraceMarker struct{}
+
+type controlMigrationPauseTracer struct {
+	once        sync.Once
+	objectsRead chan struct{}
+	release     <-chan struct{}
+}
+
+func (tracer *controlMigrationPauseTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(data.SQL, "c.relname NOT IN ('goose_db_version', 'goose_db_version_id_seq')") {
+		return context.WithValue(ctx, controlMigrationTraceMarker{}, true)
+	}
+	return ctx
+}
+
+func (tracer *controlMigrationPauseTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
+	marked, _ := ctx.Value(controlMigrationTraceMarker{}).(bool)
+	if !marked {
+		return
+	}
+	tracer.once.Do(func() {
+		close(tracer.objectsRead)
+		select {
+		case <-tracer.release:
+		case <-ctx.Done():
+		}
+	})
 }
 
 func TestControlMigrationRefusesLegacySchemaWithoutChangingRows(t *testing.T) {
