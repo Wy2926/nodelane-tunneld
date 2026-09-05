@@ -212,7 +212,7 @@ Refresh Token 优先存入系统凭据库。Windows 使用 Credential Manager；
 逻辑状态按字段派生：
 
 - `ACTIVE`：`status=active`
-- `DELETED_RECOVERABLE`：已删除、当前时间不晚于 `recoverable_until`、名称尚未释放
+- `DELETED_RECOVERABLE`：已删除、当前时间严格早于 `recoverable_until`、名称尚未释放
 - `RELEASED`：名称已释放，路由保持删除且不可恢复
 
 对子域名建立大小写无关的部分唯一约束，只约束 `name_released_at IS NULL` 的记录。这样隔离期阻止抢注，期满释放后又不需要删除历史路由行。
