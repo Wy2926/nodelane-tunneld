@@ -131,6 +131,8 @@ Commit with `feat: add control domain state and route policy`. The reviewer chec
 
 **Interfaces:**
 
+Consumes `domain.OperationCreateRoute = "create_route"`, `domain.OperationStartRun = "start_run"`, and `domain.OperationRedeemLaunch = "redeem_launch"`, published by Task 1. These constants remain defined only in the domain package.
+
 ```go
 type OpaqueCredential struct {
     ID string
