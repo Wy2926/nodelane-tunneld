@@ -105,9 +105,6 @@ func (p *ControlPostgres) CreateRoute(ctx context.Context, cmd domain.CreateRout
 		if err := lockControlAccounts(ctx, tx, accountIDs...); err != nil {
 			return err
 		}
-		if err := routes.ValidateSubdomain(cmd.Subdomain); err != nil {
-			return err
-		}
 
 		currentReplay, err := p.discoverCreateReplay(ctx, tx, cmd.AccountID, keyHash)
 		if err != nil {
@@ -135,7 +132,6 @@ func (p *ControlPostgres) CreateRoute(ctx context.Context, cmd domain.CreateRout
 		if err := lockControlRoutes(ctx, tx, routeIDs...); err != nil {
 			return err
 		}
-		now := p.nowUTC()
 
 		if currentReplay.RouteID != "" {
 			replay, err := p.readControlReplay(ctx, tx, domain.OperationCreateRoute, cmd.AccountID, keyHash, true)
@@ -145,6 +141,7 @@ func (p *ControlPostgres) CreateRoute(ctx context.Context, cmd domain.CreateRout
 			if replay.RequestHash != requestHash {
 				return domain.ErrIdempotencyConflict
 			}
+			now := p.nowUTC()
 			var owner string
 			if err := tx.QueryRowContext(ctx, `SELECT account_id::text FROM tunnel_routes WHERE id=$1`, replay.RouteID).Scan(&owner); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
@@ -165,6 +162,10 @@ func (p *ControlPostgres) CreateRoute(ctx context.Context, cmd domain.CreateRout
 			result.Replayed = true
 			return nil
 		}
+		if err := routes.ValidateSubdomain(cmd.Subdomain); err != nil {
+			return err
+		}
+		now := p.nowUTC()
 
 		if currentHolder.RouteID != "" {
 			holder, err := scanControlRoute(tx.QueryRowContext(ctx, `SELECT `+controlRouteColumns+` FROM tunnel_routes WHERE id=$1`, currentHolder.RouteID))
@@ -334,6 +335,10 @@ func (p *ControlPostgres) ReleaseExpiredNames(ctx context.Context, limit int) (i
 				return err
 			}
 			candidates = append(candidates, candidate)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
 		}
 		if err := rows.Close(); err != nil {
 			return err

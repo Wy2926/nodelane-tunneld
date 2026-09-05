@@ -69,6 +69,34 @@ func insertControlTestRun(t *testing.T, db *sql.DB, routeID, runID string, statu
 	}
 }
 
+func controlTestBlockerPID(t *testing.T, tx *sql.Tx) int {
+	t.Helper()
+	var pid int
+	if err := tx.QueryRow(`SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+		t.Fatal(err)
+	}
+	return pid
+}
+
+func waitForControlLockWait(t *testing.T, db *sql.DB, blockerPID int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var waiting bool
+		if err := db.QueryRow(`SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			WHERE $1 = ANY(pg_blocking_pids(pid))
+		)`, blockerPID).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("production method did not reach the expected PostgreSQL lock wait")
+}
+
 func TestControlAccountProjectionIsConcurrentAndIssuerSubjectOnly(t *testing.T) {
 	control, db, clock := newControlRouteTestStore(t)
 	ctx := context.Background()
@@ -121,6 +149,46 @@ func TestControlAccountProjectionIsConcurrentAndIssuerSubjectOnly(t *testing.T) 
 	}
 	if otherIssuer.ID == accountID || controlTestTableCount(t, db, "tunnel_accounts") != 2 {
 		t.Fatal("issuer and subject were not the complete stable identity key")
+	}
+}
+
+func TestControlAccountSamplesLastSeenAfterWaitingForAccountLock(t *testing.T) {
+	control, db, clock := newControlRouteTestStore(t)
+	account := resolveControlTestAccount(t, control, "locked-account")
+	blocker, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback()
+	blockerPID := controlTestBlockerPID(t, blocker)
+	var locked string
+	if err := blocker.QueryRow(`SELECT id::text FROM tunnel_accounts WHERE id=$1 FOR UPDATE`, account.ID).Scan(&locked); err != nil {
+		t.Fatal(err)
+	}
+
+	type resolveResult struct {
+		account domain.Account
+		err     error
+	}
+	result := make(chan resolveResult, 1)
+	go func() {
+		resolved, err := control.ResolveAccount(context.Background(), account.IdentityIssuer, account.IdentitySubject)
+		result <- resolveResult{account: resolved, err: err}
+	}()
+	waitForControlLockWait(t, db, blockerPID)
+	wantLastSeen := clock.Now().Add(time.Minute)
+	clock.Set(wantLastSeen)
+	if err := blocker.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-result:
+		if got.err != nil || !got.account.LastSeenAt.Equal(wantLastSeen) {
+			t.Fatalf("resolved after lock wait = %+v, %v; want last seen %s", got.account, got.err, wantLastSeen)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ResolveAccount did not finish after releasing account lock")
 	}
 }
 
@@ -178,10 +246,12 @@ func TestControlRouteCreateReplayIsAtomicAndBodyBound(t *testing.T) {
 	if controlTestTableCount(t, db, "tunnel_routes") != 1 || controlTestTableCount(t, db, "operation_replays") != 1 {
 		t.Fatal("replay allocated a second route or replay row")
 	}
-	changed := cmd
-	changed.Subdomain = "different-route"
-	if result, err := control.CreateRoute(context.Background(), changed); !errors.Is(err, domain.ErrIdempotencyConflict) || result.Route.ID != "" {
-		t.Fatalf("changed replay = %+v, %v", result, err)
+	for _, changedLabel := range []string{"different-route", "Bad", "admin"} {
+		changed := cmd
+		changed.Subdomain = changedLabel
+		if result, err := control.CreateRoute(context.Background(), changed); !errors.Is(err, domain.ErrIdempotencyConflict) || result.Route.ID != "" {
+			t.Fatalf("changed replay label %q = %+v, %v", changedLabel, result, err)
+		}
 	}
 	var ciphertext []byte
 	if err := db.QueryRow(`SELECT response_ciphertext FROM operation_replays`).Scan(&ciphertext); err != nil {
@@ -201,6 +271,54 @@ func TestControlRouteCreateReplayIsAtomicAndBodyBound(t *testing.T) {
 	stored, err := control.GetRoute(context.Background(), account.ID, first.Route.ID)
 	if err != nil || stored.Status != domain.RouteDeleted || controlTestTableCount(t, db, "tunnel_routes") != 1 {
 		t.Fatalf("deleted route was recreated: %+v, %v", stored, err)
+	}
+}
+
+func TestControlRouteReplaySamplesExpiryAfterWaitingForReplayLock(t *testing.T) {
+	control, db, clock := newControlRouteTestStore(t)
+	account := resolveControlTestAccount(t, control, "locked-replay")
+	cmd := domain.CreateRouteCommand{
+		AccountID: account.ID, Protocol: "http", Subdomain: "locked-replay", IdempotencyKey: "locked-replay-key",
+	}
+	created, err := control.CreateRoute(context.Background(), cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Set(created.Route.CreatedAt.Add(time.Minute))
+
+	blocker, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback()
+	blockerPID := controlTestBlockerPID(t, blocker)
+	var replayID string
+	if err := blocker.QueryRow(`SELECT id FROM operation_replays WHERE route_id=$1 FOR UPDATE`, created.Route.ID).Scan(&replayID); err != nil {
+		t.Fatal(err)
+	}
+
+	type createResult struct {
+		result domain.CreateRouteResult
+		err    error
+	}
+	result := make(chan createResult, 1)
+	go func() {
+		replayed, err := control.CreateRoute(context.Background(), cmd)
+		result <- createResult{result: replayed, err: err}
+	}()
+	waitForControlLockWait(t, db, blockerPID)
+	clock.Set(created.Route.CreatedAt.Add(2 * time.Minute))
+	if err := blocker.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-result:
+		if !errors.Is(got.err, identity.ErrReplayExpired) || got.result.Route.ID != "" {
+			t.Fatalf("replay after lock-wait expiry = %+v, %v", got.result, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("CreateRoute replay did not finish after releasing replay lock")
 	}
 }
 
