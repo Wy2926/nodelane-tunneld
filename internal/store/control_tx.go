@@ -18,6 +18,7 @@ func (p *ControlPostgres) withControlTx(ctx context.Context, fn func(*sql.Tx) er
 		if err != nil {
 			return err
 		}
+		defer tx.Rollback()
 		err = fn(tx)
 		if err != nil {
 			_ = tx.Rollback()
