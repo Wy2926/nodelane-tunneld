@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ideas and questions
+    url: https://github.com/Wy2926/nodelane-tunneld/discussions
+    about: Start a conversation in GitHub Discussions.
+  - name: Security report
+    url: https://github.com/Wy2926/nodelane-tunneld/security/advisories/new
+    about: Report vulnerabilities privately. Never post credentials in a public issue.

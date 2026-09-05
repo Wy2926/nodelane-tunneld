@@ -14,6 +14,13 @@ export interface Translation {
   languageLabel: string;
   mainSite: string;
   mainSiteLabel: string;
+  feedback: {
+    label: string;
+    menuLabel: string;
+    discussion: string;
+    issue: string;
+    security: string;
+  };
   railLabel: string;
   hero: {
     topline: string;
@@ -60,7 +67,6 @@ export interface Translation {
     anonymous: PlanTranslation;
     account: PlanTranslation;
     rows: readonly [
-      ComparisonRowTranslation,
       ComparisonRowTranslation,
       ComparisonRowTranslation,
       ComparisonRowTranslation,
