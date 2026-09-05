@@ -44,13 +44,14 @@ type Server struct {
 	auth         Authenticator
 	routes       RouteRepository
 	runs         RunRepository
+	stats        RuntimeStatsProvider
 	sourceIP     SourceIPFunc
 	banned       BanChecker
 	rateLimit    RateLimiter
 }
 
 func New(options Options) (*Server, error) {
-	if options.Authenticator == nil || options.Routes == nil || options.Runs == nil || options.SourceIP == nil || options.Banned == nil || options.RateLimit == nil {
+	if options.Authenticator == nil || options.Routes == nil || options.Runs == nil || options.Stats == nil || options.SourceIP == nil || options.Banned == nil || options.RateLimit == nil {
 		return nil, errors.New("control API dependencies are required")
 	}
 	if err := validatePublicOrigin(options.PublicOrigin); err != nil {
@@ -65,6 +66,7 @@ func New(options Options) (*Server, error) {
 		auth:         options.Authenticator,
 		routes:       options.Routes,
 		runs:         options.Runs,
+		stats:        options.Stats,
 		sourceIP:     options.SourceIP,
 		banned:       options.Banned,
 		rateLimit:    options.RateLimit,
@@ -136,6 +138,8 @@ func (s *Server) serveRouteResource(w http.ResponseWriter, r *http.Request) {
 		s.issueLaunchCode(w, r, routeID)
 	case len(parts) == 2 && parts[1] == "runs" && r.Method == http.MethodPost:
 		s.startAccountRun(w, r, routeID)
+	case len(parts) == 2 && parts[1] == "stats" && r.Method == http.MethodGet:
+		s.getRouteStats(w, r, routeID)
 	case len(parts) == 4 && parts[1] == "runs" && parts[2] == "current" && parts[3] == "stop" && r.Method == http.MethodPost:
 		s.stopOwnedRun(w, r, routeID)
 	case knownRouteShape(parts):
@@ -164,13 +168,16 @@ func (s *Server) serveRunResource(w http.ResponseWriter, r *http.Request) {
 
 func knownRouteShape(parts []string) bool {
 	return len(parts) == 1 ||
-		len(parts) == 2 && (parts[1] == "restore" || parts[1] == "launch-codes" || parts[1] == "runs") ||
+		len(parts) == 2 && (parts[1] == "restore" || parts[1] == "launch-codes" || parts[1] == "runs" || parts[1] == "stats") ||
 		len(parts) == 4 && parts[1] == "runs" && parts[2] == "current" && parts[3] == "stop"
 }
 
 func allowedRouteMethods(parts []string) []string {
 	if len(parts) == 1 {
 		return []string{http.MethodGet, http.MethodDelete}
+	}
+	if len(parts) == 2 && parts[1] == "stats" {
+		return []string{http.MethodGet}
 	}
 	return []string{http.MethodPost}
 }
@@ -420,7 +427,7 @@ func validResourceID(id, prefix string) bool {
 
 func validatePublicOrigin(raw string) error {
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.String() != raw {
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.Opaque != "" || parsed.User != nil || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawFragment != "" || parsed.String() != raw {
 		return errors.New("public origin must be an exact HTTPS origin")
 	}
 	return nil

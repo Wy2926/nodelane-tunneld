@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Wy2926/nodelane-tunneld/internal/domain"
+	"github.com/Wy2926/nodelane-tunneld/internal/runtimestats"
 )
 
 type routeDTO struct {
@@ -44,6 +45,42 @@ type startRouteDTO struct {
 	Subdomain string `json:"subdomain"`
 	ProxyName string `json:"proxy_name"`
 	PublicURL string `json:"public_url"`
+}
+
+type statsDTO struct {
+	RouteID            string                    `json:"route_id"`
+	CurrentConnections *int64                    `json:"current_connections"`
+	UploadBytesToday   *int64                    `json:"upload_bytes_today"`
+	DownloadBytesToday *int64                    `json:"download_bytes_today"`
+	ProxyState         *string                   `json:"proxy_state"`
+	ObservedAt         time.Time                 `json:"observed_at"`
+	Availability       runtimestats.Availability `json:"availability"`
+	TimeZone           string                    `json:"time_zone"`
+}
+
+func makeStatsDTO(routeID string, snapshot runtimestats.Snapshot) statsDTO {
+	return statsDTO{
+		RouteID: routeID, CurrentConnections: snapshot.CurrentConnections,
+		UploadBytesToday: snapshot.UploadBytesToday, DownloadBytesToday: snapshot.DownloadBytesToday,
+		ProxyState: snapshot.ProxyState, ObservedAt: snapshot.ObservedAt.UTC(),
+		Availability: snapshot.Availability, TimeZone: "UTC",
+	}
+}
+
+func normalizeStatsSnapshot(snapshot runtimestats.Snapshot) runtimestats.Snapshot {
+	validState := snapshot.ProxyState != nil && (*snapshot.ProxyState == "online" || *snapshot.ProxyState == "offline")
+	validNumbers := snapshot.CurrentConnections != nil && *snapshot.CurrentConnections >= 0 &&
+		snapshot.UploadBytesToday != nil && *snapshot.UploadBytesToday >= 0 &&
+		snapshot.DownloadBytesToday != nil && *snapshot.DownloadBytesToday >= 0
+	if snapshot.Availability == runtimestats.Available && validState && validNumbers && !snapshot.ObservedAt.IsZero() {
+		snapshot.ObservedAt = snapshot.ObservedAt.UTC()
+		return snapshot
+	}
+	availability := snapshot.Availability
+	if availability != runtimestats.NotObserved && availability != runtimestats.Unavailable {
+		availability = runtimestats.Unavailable
+	}
+	return runtimestats.Snapshot{ObservedAt: snapshot.ObservedAt.UTC(), Availability: availability}
 }
 
 func (s *Server) routeProjection(view domain.RouteView) routeDTO {

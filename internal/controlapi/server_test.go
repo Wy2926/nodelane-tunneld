@@ -13,9 +13,11 @@ import (
 
 	"github.com/Wy2926/nodelane-tunneld/internal/domain"
 	"github.com/Wy2926/nodelane-tunneld/internal/identity"
+	"github.com/Wy2926/nodelane-tunneld/internal/runtimestats"
 )
 
 const testRouteID = "rte_abcdefghijklmnopqrstuvwxyz"
+const testStatsProxyName = "rte_bbbbbbbbbbbbbbbbbbbbbbbbbb"
 const testRunID = "run_abcdefghijklmnopqrstuvwxyz"
 const testRunToken = "nrc_abcdefghijklmnopqrstuvwxyz.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 const testLaunchToken = "nlc_abcdefghijklmnopqrstuvwxyz.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -121,6 +123,18 @@ func (f *recordingRepository) RequestCredentialStop(_ context.Context, proof dom
 	return f.result.Run, f.err
 }
 
+type recordingStats struct {
+	calls    int
+	proxy    string
+	snapshot runtimestats.Snapshot
+}
+
+func (s *recordingStats) Snapshot(_ context.Context, proxyName string) runtimestats.Snapshot {
+	s.calls++
+	s.proxy = proxyName
+	return s.snapshot
+}
+
 type rateCall struct {
 	operation, key string
 	limit          int
@@ -130,14 +144,20 @@ type fixture struct {
 	options Options
 	auth    *recordingAuthenticator
 	repo    *recordingRepository
+	stats   *recordingStats
 	rates   []rateCall
 }
 
 func newFixture() *fixture {
 	route := domain.Route{ID: testRouteID, AccountID: "private-account-id", Protocol: "http", Subdomain: "example", ProxyName: testRouteID, Status: domain.RouteActive, CreatedAt: testTime, UpdatedAt: testTime}
 	run := domain.Run{ID: testRunID, RouteID: testRouteID, StartedVia: domain.StartedViaDeviceLogin, Status: domain.RunStarting, DesiredState: domain.DesiredRunning, RequestIP: netip.MustParseAddr("192.0.2.9"), ConnectedIP: netip.MustParseAddr("192.0.2.10"), CreatedAt: testTime, ConnectDeadlineAt: testTime.Add(2 * time.Minute)}
-	f := &fixture{auth: &recordingAuthenticator{principal: Principal{AccountID: "verified-account", Kind: PrincipalKindWeb, CSRFToken: "private-csrf-token"}}, repo: &recordingRepository{view: domain.RouteView{Route: route, CurrentRun: &run}, result: domain.StartResult{Run: run, CredentialID: "private-credential-id", CredentialToken: testRunToken, Replayed: true}}}
-	f.options = Options{PublicOrigin: "https://tunnel.example.test", PublicDomain: "tunnel.example.test", Authenticator: f.auth, Routes: f.repo, Runs: f.repo, SourceIP: func(*http.Request) (netip.Addr, error) { return netip.MustParseAddr("::ffff:192.0.2.9"), nil }, Banned: func(context.Context, netip.Addr) (bool, error) { return false, nil }, RateLimit: func(_ context.Context, operation, key string, limit int, window time.Duration) (time.Duration, error) {
+	connections, upload, download, state := int64(3), int64(202), int64(101), "online"
+	f := &fixture{
+		auth:  &recordingAuthenticator{principal: Principal{AccountID: "verified-account", Kind: PrincipalKindWeb, CSRFToken: "private-csrf-token"}},
+		repo:  &recordingRepository{view: domain.RouteView{Route: route, CurrentRun: &run}, result: domain.StartResult{Run: run, CredentialID: "private-credential-id", CredentialToken: testRunToken, Replayed: true}},
+		stats: &recordingStats{snapshot: runtimestats.Snapshot{CurrentConnections: &connections, UploadBytesToday: &upload, DownloadBytesToday: &download, ProxyState: &state, ObservedAt: testTime, Availability: runtimestats.Available}},
+	}
+	f.options = Options{PublicOrigin: "https://tunnel.example.test", PublicDomain: "tunnel.example.test", Authenticator: f.auth, Routes: f.repo, Runs: f.repo, Stats: f.stats, SourceIP: func(*http.Request) (netip.Addr, error) { return netip.MustParseAddr("::ffff:192.0.2.9"), nil }, Banned: func(context.Context, netip.Addr) (bool, error) { return false, nil }, RateLimit: func(_ context.Context, operation, key string, limit int, window time.Duration) (time.Duration, error) {
 		f.rates = append(f.rates, rateCall{operation, key, limit, window})
 		return 0, nil
 	}, Now: func() time.Time { return testTime }}
@@ -190,6 +210,7 @@ func TestAccountEndpointMediumAndScopeMatrix(t *testing.T) {
 	}{
 		{"GET", "/api/v1/routes", "", true, true, false},
 		{"GET", "/api/v1/routes/" + testRouteID, "", true, true, false},
+		{"GET", "/api/v1/routes/" + testRouteID + "/stats", "", true, true, false},
 		{"POST", "/api/v1/routes", `{"protocol":"http","subdomain":"example"}`, true, false, false},
 		{"DELETE", "/api/v1/routes/" + testRouteID, "{}", true, false, false},
 		{"POST", "/api/v1/routes/" + testRouteID + "/restore", "{}", true, false, false},
@@ -236,8 +257,8 @@ func TestAccountEndpointMediumAndScopeMatrix(t *testing.T) {
 						code = "unauthorized"
 					}
 					assertError(t, w, status, code)
-					if len(f.repo.calls) != 0 || len(f.rates) != 0 {
-						t.Fatalf("denied request touched dependencies: %v %v", f.repo.calls, f.rates)
+					if len(f.repo.calls) != 0 || len(f.rates) != 0 || f.stats.calls != 0 {
+						t.Fatalf("denied request touched dependencies: repo=%v rates=%v stats=%d", f.repo.calls, f.rates, f.stats.calls)
 					}
 				}
 			})
@@ -307,12 +328,23 @@ func TestParameterlessCommandsAcceptEmptyOrObjectButRejectFields(t *testing.T) {
 }
 
 func TestNewRejectsMissingDependenciesAndUnsafeOrigins(t *testing.T) {
-	for _, change := range []func(*Options){func(o *Options) { o.Authenticator = nil }, func(o *Options) { o.Routes = nil }, func(o *Options) { o.Runs = nil }, func(o *Options) { o.SourceIP = nil }, func(o *Options) { o.Banned = nil }, func(o *Options) { o.RateLimit = nil }, func(o *Options) { o.PublicOrigin = "http://tunnel.example.test" }, func(o *Options) { o.PublicOrigin = "https://user:secret@tunnel.example.test" }, func(o *Options) { o.PublicOrigin = "https://tunnel.example.test/path" }, func(o *Options) { o.PublicOrigin = "https://tunnel.example.test?query=1" }, func(o *Options) { o.PublicDomain = "https://tunnel.example.test" }, func(o *Options) { o.PublicDomain = "tunnel.example.test/path" }, func(o *Options) { o.PublicDomain = "*.example.test" }, func(o *Options) { o.PublicDomain = "" }} {
+	for _, change := range []func(*Options){func(o *Options) { o.Authenticator = nil }, func(o *Options) { o.Routes = nil }, func(o *Options) { o.Runs = nil }, func(o *Options) { o.Stats = nil }, func(o *Options) { o.SourceIP = nil }, func(o *Options) { o.Banned = nil }, func(o *Options) { o.RateLimit = nil }, func(o *Options) { o.PublicOrigin = "http://tunnel.example.test" }, func(o *Options) { o.PublicOrigin = "https://user:secret@tunnel.example.test" }, func(o *Options) { o.PublicOrigin = "https://tunnel.example.test/path" }, func(o *Options) { o.PublicOrigin = "https://tunnel.example.test?query=1" }, func(o *Options) { o.PublicOrigin = "https://tunnel.example.test?" }, func(o *Options) { o.PublicDomain = "https://tunnel.example.test" }, func(o *Options) { o.PublicDomain = "tunnel.example.test/path" }, func(o *Options) { o.PublicDomain = "*.example.test" }, func(o *Options) { o.PublicDomain = "" }} {
 		f := newFixture()
 		change(&f.options)
 		if _, err := New(f.options); err == nil {
 			t.Fatal("invalid API options accepted")
 		}
+	}
+}
+
+func TestRouteListRejectsMalformedQueryBeforeAuthentication(t *testing.T) {
+	f := newFixture()
+	w := f.request(t, http.MethodGet, "/api/v1/routes", "", func(r *http.Request) {
+		r.URL.RawQuery = "deleted=true&ignored=%ZZ"
+	})
+	assertError(t, w, http.StatusBadRequest, "invalid_request")
+	if f.auth.calls != 0 || len(f.repo.calls) != 0 {
+		t.Fatalf("malformed query reached dependencies: auth=%d repo=%v", f.auth.calls, f.repo.calls)
 	}
 }
 
@@ -407,6 +439,7 @@ func TestSourceAndBanChecksOnlyGuardAllocatingOrRenewingOperations(t *testing.T)
 	}{
 		{name: "list", method: http.MethodGet, path: "/api/v1/routes"},
 		{name: "detail", method: http.MethodGet, path: "/api/v1/routes/" + testRouteID},
+		{name: "stats", method: http.MethodGet, path: "/api/v1/routes/" + testRouteID + "/stats"},
 		{name: "delete", method: http.MethodDelete, path: "/api/v1/routes/" + testRouteID, body: "{}"},
 		{name: "owner stop", method: http.MethodPost, path: "/api/v1/routes/" + testRouteID + "/runs/current/stop", body: "{}"},
 		{name: "credential stop", method: http.MethodPost, path: "/api/v1/runs/" + testRunID + "/stop", body: "{}", configure: func(f *fixture) {
@@ -652,6 +685,115 @@ func TestRunCredentialLifecycleUsesOnlyOpaqueProof(t *testing.T) {
 			}
 			if !strings.Contains(w.Body.String(), wantStopped) {
 				t.Fatalf("lifecycle stopped flag: %s", w.Body)
+			}
+		})
+	}
+}
+
+func TestStatsUsesOwnedDatabaseProxyNameAndWhitelistsCurrentSnapshot(t *testing.T) {
+	f := newFixture()
+	f.repo.view.Route.ProxyName = testStatsProxyName
+	w := f.request(t, http.MethodGet, "/api/v1/routes/"+testRouteID+"/stats", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("stats response: %d %s", w.Code, w.Body)
+	}
+	if f.repo.accountID != "verified-account" || f.repo.routeID != testRouteID || f.stats.calls != 1 || f.stats.proxy != testStatsProxyName {
+		t.Fatalf("stats did not resolve owned proxy: account=%q route=%q calls=%d proxy=%q", f.repo.accountID, f.repo.routeID, f.stats.calls, f.stats.proxy)
+	}
+	for _, field := range []string{
+		`"route_id":"` + testRouteID + `"`, `"current_connections":3`, `"upload_bytes_today":202`,
+		`"download_bytes_today":101`, `"proxy_state":"online"`, `"observed_at":"2026-09-05T12:00:00Z"`, `"availability":"available"`, `"time_zone":"UTC"`,
+	} {
+		if !strings.Contains(w.Body.String(), field) {
+			t.Fatalf("stats omitted %s: %s", field, w.Body)
+		}
+	}
+	var publicFields map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &publicFields); err != nil {
+		t.Fatal(err)
+	}
+	wantFields := []string{"route_id", "current_connections", "upload_bytes_today", "download_bytes_today", "proxy_state", "observed_at", "availability", "time_zone"}
+	if len(publicFields) != len(wantFields) {
+		t.Fatalf("stats DTO field count = %d, want %d: %s", len(publicFields), len(wantFields), w.Body)
+	}
+	for _, field := range wantFields {
+		if _, ok := publicFields[field]; !ok {
+			t.Fatalf("stats DTO missing %q: %s", field, w.Body)
+		}
+	}
+	for _, forbidden := range []string{"private-account-id", "user", "clientID", "spec", "request_ip", "connected_ip"} {
+		if strings.Contains(w.Body.String(), forbidden) {
+			t.Fatalf("stats leaked %q: %s", forbidden, w.Body)
+		}
+	}
+
+	f = newFixture()
+	f.stats.snapshot = runtimestats.Snapshot{Availability: runtimestats.Unavailable, ObservedAt: testTime}
+	w = f.request(t, http.MethodGet, "/api/v1/routes/"+testRouteID+"/stats", "", nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"current_connections":null`) || !strings.Contains(w.Body.String(), `"availability":"unavailable"`) {
+		t.Fatalf("unavailable stats invented data or failed request: %d %s", w.Code, w.Body)
+	}
+
+	f = newFixture()
+	f.repo.getErr = domain.ErrRouteNotFound
+	w = f.request(t, http.MethodGet, "/api/v1/routes/"+testRouteID+"/stats", "", nil)
+	assertError(t, w, http.StatusNotFound, "route_not_found")
+	if f.stats.calls != 0 {
+		t.Fatal("foreign or missing route reached native statistics")
+	}
+}
+
+func TestStatsRejectsQueriesAndWrongMethodsBeforeDependencies(t *testing.T) {
+	f := newFixture()
+	w := f.request(t, http.MethodGet, "/api/v1/routes/"+testRouteID+"/stats?history=true", "", nil)
+	assertError(t, w, http.StatusBadRequest, "invalid_request")
+	if f.auth.calls != 0 || len(f.repo.calls) != 0 || f.stats.calls != 0 {
+		t.Fatalf("stats query reached dependencies: auth=%d repo=%v stats=%d", f.auth.calls, f.repo.calls, f.stats.calls)
+	}
+
+	f = newFixture()
+	w = f.request(t, http.MethodPost, "/api/v1/routes/"+testRouteID+"/stats", "{}", nil)
+	assertError(t, w, http.StatusMethodNotAllowed, "invalid_request")
+	if w.Header().Get("Allow") != http.MethodGet || f.auth.calls != 0 || len(f.repo.calls) != 0 || f.stats.calls != 0 {
+		t.Fatalf("stats method handling incorrect: allow=%q auth=%d repo=%v stats=%d", w.Header().Get("Allow"), f.auth.calls, f.repo.calls, f.stats.calls)
+	}
+}
+
+func TestStatsFailsClosedForIncompleteOrContradictorySnapshots(t *testing.T) {
+	connections, upload, download := int64(3), int64(202), int64(101)
+	negative := int64(-1)
+	online, unknown := "online", "private-state"
+	tests := []struct {
+		name         string
+		snapshot     runtimestats.Snapshot
+		availability runtimestats.Availability
+	}{
+		{name: "negative connections", snapshot: runtimestats.Snapshot{CurrentConnections: &negative, UploadBytesToday: &upload, DownloadBytesToday: &download, ProxyState: &online, ObservedAt: testTime, Availability: runtimestats.Available}, availability: runtimestats.Unavailable},
+		{name: "negative upload", snapshot: runtimestats.Snapshot{CurrentConnections: &connections, UploadBytesToday: &negative, DownloadBytesToday: &download, ProxyState: &online, ObservedAt: testTime, Availability: runtimestats.Available}, availability: runtimestats.Unavailable},
+		{name: "negative download", snapshot: runtimestats.Snapshot{CurrentConnections: &connections, UploadBytesToday: &upload, DownloadBytesToday: &negative, ProxyState: &online, ObservedAt: testTime, Availability: runtimestats.Available}, availability: runtimestats.Unavailable},
+		{name: "missing connections", snapshot: runtimestats.Snapshot{UploadBytesToday: &upload, DownloadBytesToday: &download, ProxyState: &online, ObservedAt: testTime, Availability: runtimestats.Available}, availability: runtimestats.Unavailable},
+		{name: "missing upload", snapshot: runtimestats.Snapshot{CurrentConnections: &connections, DownloadBytesToday: &download, ProxyState: &online, ObservedAt: testTime, Availability: runtimestats.Available}, availability: runtimestats.Unavailable},
+		{name: "missing download", snapshot: runtimestats.Snapshot{CurrentConnections: &connections, UploadBytesToday: &upload, ProxyState: &online, ObservedAt: testTime, Availability: runtimestats.Available}, availability: runtimestats.Unavailable},
+		{name: "unknown state", snapshot: runtimestats.Snapshot{CurrentConnections: &connections, UploadBytesToday: &upload, DownloadBytesToday: &download, ProxyState: &unknown, ObservedAt: testTime, Availability: runtimestats.Available}, availability: runtimestats.Unavailable},
+		{name: "missing observation time", snapshot: runtimestats.Snapshot{CurrentConnections: &connections, UploadBytesToday: &upload, DownloadBytesToday: &download, ProxyState: &online, Availability: runtimestats.Available}, availability: runtimestats.Unavailable},
+		{name: "not observed with injected fields", snapshot: runtimestats.Snapshot{CurrentConnections: &connections, UploadBytesToday: &upload, DownloadBytesToday: &download, ProxyState: &online, ObservedAt: testTime, Availability: runtimestats.NotObserved}, availability: runtimestats.NotObserved},
+		{name: "unavailable with injected fields", snapshot: runtimestats.Snapshot{CurrentConnections: &connections, UploadBytesToday: &upload, DownloadBytesToday: &download, ProxyState: &online, ObservedAt: testTime, Availability: runtimestats.Unavailable}, availability: runtimestats.Unavailable},
+		{name: "unknown availability", snapshot: runtimestats.Snapshot{CurrentConnections: &connections, UploadBytesToday: &upload, DownloadBytesToday: &download, ProxyState: &online, ObservedAt: testTime, Availability: "private"}, availability: runtimestats.Unavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFixture()
+			f.stats.snapshot = test.snapshot
+			w := f.request(t, http.MethodGet, "/api/v1/routes/"+testRouteID+"/stats", "", nil)
+			if w.Code != http.StatusOK {
+				t.Fatalf("stats response: %d %s", w.Code, w.Body)
+			}
+			var body statsDTO
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Availability != test.availability || body.CurrentConnections != nil || body.UploadBytesToday != nil || body.DownloadBytesToday != nil || body.ProxyState != nil {
+				t.Fatalf("invalid snapshot crossed public boundary: %#v", body)
 			}
 		})
 	}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Wy2926/nodelane-tunneld/internal/domain"
+	"github.com/Wy2926/nodelane-tunneld/internal/runtimestats"
 )
 
 var (
@@ -51,6 +52,10 @@ type RunRepository interface {
 	RequestCredentialStop(context.Context, domain.RunProof) (domain.Run, error)
 }
 
+type RuntimeStatsProvider interface {
+	Snapshot(context.Context, string) runtimestats.Snapshot
+}
+
 type SourceIPFunc func(*http.Request) (netip.Addr, error)
 type BanChecker func(context.Context, netip.Addr) (bool, error)
 type RateLimiter func(context.Context, string, string, int, time.Duration) (time.Duration, error)
@@ -61,6 +66,7 @@ type Options struct {
 	Authenticator Authenticator
 	Routes        RouteRepository
 	Runs          RunRepository
+	Stats         RuntimeStatsProvider
 	SourceIP      SourceIPFunc
 	Banned        BanChecker
 	RateLimit     RateLimiter

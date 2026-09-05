@@ -2,6 +2,7 @@ package controlapi
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -46,6 +47,24 @@ func (s *Server) getRoute(w http.ResponseWriter, r *http.Request, routeID string
 		return
 	}
 	writeJSON(w, http.StatusOK, s.routeProjection(view))
+}
+
+func (s *Server) getRouteStats(w http.ResponseWriter, r *http.Request, routeID string) {
+	if r.URL.RawQuery != "" {
+		s.writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	principal, ok := s.authorizeAccount(w, r, true, "routes:read")
+	if !ok {
+		return
+	}
+	view, err := s.routes.GetRouteView(r.Context(), principal.AccountID, routeID)
+	if err != nil {
+		s.writeDomainError(w, err)
+		return
+	}
+	snapshot := normalizeStatsSnapshot(s.stats.Snapshot(r.Context(), view.Route.ProxyName))
+	writeJSON(w, http.StatusOK, makeStatsDTO(routeID, snapshot))
 }
 
 type createRouteRequest struct {
@@ -215,7 +234,10 @@ func parseRouteQuery(r *http.Request) (domain.RouteQuery, bool) {
 	if r.URL.RawQuery == "" {
 		return domain.RouteQuery{}, true
 	}
-	values := r.URL.Query()
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return domain.RouteQuery{}, false
+	}
 	if len(values) != 1 {
 		return domain.RouteQuery{}, false
 	}
