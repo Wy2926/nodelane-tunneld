@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,8 @@ import (
 )
 
 var browserTestNow = time.Date(2026, 9, 6, 9, 0, 0, 0, time.UTC)
+
+const browserTestSessionID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 type fakeProvider struct {
 	authorizationErr error
@@ -186,6 +189,15 @@ func (f *browserFixture) request(method, target, body string, change func(*http.
 	return response
 }
 
+func (f *browserFixture) loginAndCallback(code string) *httptest.ResponseRecorder {
+	login := f.request(http.MethodGet, "/auth/login", "", nil)
+	cookie := login.Result().Cookies()[0]
+	state := f.sessions.login.State
+	return f.request(http.MethodGet, "/auth/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(state), "", func(r *http.Request) {
+		r.AddCookie(cookie)
+	})
+}
+
 func requireBFFError(t *testing.T, response *httptest.ResponseRecorder, status int, code string) {
 	t.Helper()
 	var envelope struct {
@@ -306,6 +318,86 @@ func TestCallbackConsumesBindingCreatesSessionAndRedirectsLocally(t *testing.T) 
 	}
 }
 
+func TestCallbackRevokesTokensAndFailsClosedOnInvalidIdentityOrAccountBinding(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*browserFixture)
+		revokes   int
+	}{
+		{name: "missing refresh token", configure: func(f *browserFixture) { f.provider.tokens.RefreshToken = "" }, revokes: 0},
+		{name: "missing verified issuer", configure: func(f *browserFixture) { f.provider.tokens.Identity.Issuer = "" }, revokes: 1},
+		{name: "missing verified subject", configure: func(f *browserFixture) { f.provider.tokens.Identity.Subject = "" }, revokes: 1},
+		{name: "account issuer mismatch", configure: func(f *browserFixture) { f.accounts.account.IdentityIssuer = "https://other.example.test/oidc" }, revokes: 1},
+		{name: "account subject mismatch", configure: func(f *browserFixture) { f.accounts.account.IdentitySubject = "other-subject" }, revokes: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newBrowserFixture(t)
+			test.configure(f)
+			response := f.loginAndCallback("authorization-code")
+			requireBFFError(t, response, http.StatusServiceUnavailable, "dependency_unavailable")
+			if f.provider.revokeCalls != test.revokes || f.sessions.createCalls != 0 {
+				t.Fatalf("invalid identity cleanup incorrect: revokes=%d sessions=%d", f.provider.revokeCalls, f.sessions.createCalls)
+			}
+			if test.revokes != 0 && f.provider.revoked != "private-refresh-token" {
+				t.Fatalf("wrong refresh token revoked: %q", f.provider.revoked)
+			}
+		})
+	}
+}
+
+func TestCallbackMapsOnlyExplicitCredentialFailuresToUnauthorized(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*browserFixture)
+		status    int
+		code      string
+	}{
+		{name: "login missing", configure: func(f *browserFixture) { f.sessions.consumeErr = session.ErrNotFound }, status: http.StatusUnauthorized, code: "unauthorized"},
+		{name: "login expired", configure: func(f *browserFixture) { f.sessions.consumeErr = session.ErrExpired }, status: http.StatusUnauthorized, code: "unauthorized"},
+		{name: "login store unavailable", configure: func(f *browserFixture) { f.sessions.consumeErr = session.ErrUnavailable }, status: http.StatusServiceUnavailable, code: "dependency_unavailable"},
+		{name: "login store unknown", configure: func(f *browserFixture) { f.sessions.consumeErr = errors.New("private redis detail") }, status: http.StatusServiceUnavailable, code: "dependency_unavailable"},
+		{name: "exchange rejected", configure: func(f *browserFixture) { f.provider.exchangeErr = identity.ErrOIDCUnauthorized }, status: http.StatusUnauthorized, code: "unauthorized"},
+		{name: "exchange unavailable", configure: func(f *browserFixture) { f.provider.exchangeErr = identity.ErrOIDCUnavailable }, status: http.StatusServiceUnavailable, code: "dependency_unavailable"},
+		{name: "exchange misconfigured", configure: func(f *browserFixture) { f.provider.exchangeErr = identity.ErrOIDCConfiguration }, status: http.StatusServiceUnavailable, code: "dependency_unavailable"},
+		{name: "exchange unknown", configure: func(f *browserFixture) { f.provider.exchangeErr = errors.New("private provider detail") }, status: http.StatusServiceUnavailable, code: "dependency_unavailable"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newBrowserFixture(t)
+			test.configure(f)
+			response := f.loginAndCallback("authorization-code")
+			requireBFFError(t, response, test.status, test.code)
+			if strings.Contains(response.Body.String(), "private") || f.sessions.createCalls != 0 {
+				t.Fatalf("authentication error leaked or created session: %s calls=%d", response.Body, f.sessions.createCalls)
+			}
+		})
+	}
+}
+
+func TestBrowserEntryPointsBoundRawQueryBeforeDependencies(t *testing.T) {
+	f := newBrowserFixture(t)
+	response := f.request(http.MethodGet, "/auth/login?return_to=%2Fconsole&padding="+strings.Repeat("a", 9<<10), "", nil)
+	requireBFFError(t, response, http.StatusBadRequest, "invalid_request")
+	if f.sessions.putCalls != 0 || f.provider.state != "" {
+		t.Fatal("oversized login query reached dependencies")
+	}
+
+	f = newBrowserFixture(t)
+	response = f.request(http.MethodGet, "/auth/callback?code="+strings.Repeat("a", 17<<10)+"&state="+browserTestSessionID, "", nil)
+	requireBFFError(t, response, http.StatusUnauthorized, "unauthorized")
+	if f.sessions.consumeCalls != 0 || f.provider.exchangeCalls != 0 {
+		t.Fatal("oversized callback query reached dependencies")
+	}
+}
+
+func TestBoundedQueryRejectsSizeBeforeParsingMalformedData(t *testing.T) {
+	_, err := parseBoundedQuery(strings.Repeat("%", maxLoginQuery+1), maxLoginQuery)
+	if !errors.Is(err, errQueryTooLarge) {
+		t.Fatalf("oversized malformed query error = %v, want query-too-large", err)
+	}
+}
+
 func TestCallbackRejectsMissingDuplicateOrWrongFlowBinding(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -316,8 +408,18 @@ func TestCallbackRejectsMissingDuplicateOrWrongFlowBinding(t *testing.T) {
 		{name: "missing state", target: func(string) string { return "/auth/callback?code=code" }},
 		{name: "duplicate code", target: func(state string) string { return "/auth/callback?code=a&code=b&state=" + state }},
 		{name: "duplicate state", target: func(state string) string { return "/auth/callback?code=a&state=" + state + "&state=other" }},
+		{name: "malformed query", target: func(string) string { return "/auth/callback?code=%ZZ&state=ignored" }},
+		{name: "oversized code", target: func(state string) string {
+			return "/auth/callback?code=" + strings.Repeat("a", 4097) + "&state=" + state
+		}},
+		{name: "code line break", target: func(state string) string { return "/auth/callback?code=a%0Ab&state=" + state }},
+		{name: "malformed state", target: func(string) string { return "/auth/callback?code=a&state=short" }},
 		{name: "missing cookie", target: func(state string) string { return "/auth/callback?code=a&state=" + state }, cookie: func(*http.Cookie) *http.Cookie { return nil }},
-		{name: "wrong binding", target: func(state string) string { return "/auth/callback?code=a&state=" + state }, cookie: func(cookie *http.Cookie) *http.Cookie { copy := *cookie; copy.Value = "wrong"; return &copy }},
+		{name: "wrong binding", target: func(state string) string { return "/auth/callback?code=a&state=" + state }, cookie: func(cookie *http.Cookie) *http.Cookie {
+			copy := *cookie
+			copy.Value = browserTestSessionID
+			return &copy
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -343,7 +445,7 @@ func TestCallbackRejectsMissingDuplicateOrWrongFlowBinding(t *testing.T) {
 func TestSessionEndpointReturnsOnlyBrowserSafeProjection(t *testing.T) {
 	f := newBrowserFixture(t)
 	f.sessions.record = session.Record{
-		ID: "private-session-id", AccountID: "account-123", CSRFToken: "private-csrf-token",
+		ID: browserTestSessionID, AccountID: "account-123", CSRFToken: "private-csrf-token",
 		CreatedAt: browserTestNow.Add(-time.Hour), ExpiresAt: browserTestNow.Add(23 * time.Hour), Tokens: f.provider.tokens,
 	}
 	response := f.request(http.MethodGet, "/api/v1/session", "", func(r *http.Request) {
@@ -366,7 +468,7 @@ func TestSessionEndpointReturnsOnlyBrowserSafeProjection(t *testing.T) {
 	if !body.Authenticated || body.AccountID != "account-123" || body.Name != "Tunnel User" || body.Email != "user@example.test" || body.CSRFToken != "private-csrf-token" || body.ExpiresAt != f.sessions.record.ExpiresAt {
 		t.Fatalf("session projection incorrect: %#v", body)
 	}
-	for _, forbidden := range []string{"private-session-id", "private-access-token", "private-refresh-token", "private-id-token", "private-subject", "https://auth.example.test/oidc", "web-client"} {
+	for _, forbidden := range []string{browserTestSessionID, "private-access-token", "private-refresh-token", "private-id-token", "private-subject", "https://auth.example.test/oidc", "web-client"} {
 		if strings.Contains(response.Body.String(), forbidden) {
 			t.Fatalf("session response leaked %q", forbidden)
 		}
@@ -379,7 +481,7 @@ func TestSessionEndpointTreatsMissingOrExpiredSessionAsSignedOut(t *testing.T) {
 		f.sessions.readErr = readErr
 		response := f.request(http.MethodGet, "/api/v1/session", "", func(r *http.Request) {
 			if readErr != nil {
-				r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "expired-session"})
+				r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: browserTestSessionID})
 			}
 		})
 		if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != `{"authenticated":false}` {
@@ -395,7 +497,7 @@ func TestSessionEndpointTreatsMissingOrExpiredSessionAsSignedOut(t *testing.T) {
 	f := newBrowserFixture(t)
 	f.sessions.readErr = session.ErrUnavailable
 	response := f.request(http.MethodGet, "/api/v1/session", "", func(r *http.Request) {
-		r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "session"})
+		r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: browserTestSessionID})
 	})
 	requireBFFError(t, response, http.StatusServiceUnavailable, "dependency_unavailable")
 }
@@ -417,7 +519,7 @@ func TestLogoutRequiresSessionCSRFExactOriginAndJSON(t *testing.T) {
 	for _, test := range changes {
 		t.Run(test.name, func(t *testing.T) {
 			f := newBrowserFixture(t)
-			f.sessions.record = session.Record{ID: "session-id", AccountID: "account", CSRFToken: "csrf", ExpiresAt: browserTestNow.Add(time.Hour), Tokens: f.provider.tokens}
+			f.sessions.record = session.Record{ID: browserTestSessionID, AccountID: "account", CSRFToken: "csrf", ExpiresAt: browserTestNow.Add(time.Hour), Tokens: f.provider.tokens}
 			response := f.request(http.MethodPost, "/auth/logout", `{}`, func(r *http.Request) {
 				r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: f.sessions.record.ID})
 				r.Header.Set("Origin", "https://tunnel.example.test")
@@ -435,14 +537,14 @@ func TestLogoutRequiresSessionCSRFExactOriginAndJSON(t *testing.T) {
 
 func TestLogoutClearsLocalSessionRevokesRefreshAndReturnsEndSessionURL(t *testing.T) {
 	f := newBrowserFixture(t)
-	f.sessions.record = session.Record{ID: "session-id", AccountID: "account", CSRFToken: "csrf", ExpiresAt: browserTestNow.Add(time.Hour), Tokens: f.provider.tokens}
+	f.sessions.record = session.Record{ID: browserTestSessionID, AccountID: "account", CSRFToken: "csrf", ExpiresAt: browserTestNow.Add(time.Hour), Tokens: f.provider.tokens}
 	response := f.request(http.MethodPost, "/auth/logout", `{}`, func(r *http.Request) {
 		r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: f.sessions.record.ID})
 		r.Header.Set("Origin", "https://tunnel.example.test")
 		r.Header.Set("Content-Type", "application/json")
 		r.Header.Set("X-CSRF-Token", f.sessions.record.CSRFToken)
 	})
-	if response.Code != http.StatusOK || f.sessions.deleteCalls != 1 || f.sessions.deletedID != "session-id" || f.provider.revokeCalls != 1 || f.provider.revoked != "private-refresh-token" {
+	if response.Code != http.StatusOK || f.sessions.deleteCalls != 1 || f.sessions.deletedID != browserTestSessionID || f.provider.revokeCalls != 1 || f.provider.revoked != "private-refresh-token" {
 		t.Fatalf("logout did not clear and revoke: status=%d sessions=%#v provider=%#v", response.Code, f.sessions, f.provider)
 	}
 	var body struct {
@@ -456,7 +558,7 @@ func TestLogoutClearsLocalSessionRevokesRefreshAndReturnsEndSessionURL(t *testin
 	if len(cookies) != 1 || cookies[0].Name != SessionCookieName || cookies[0].MaxAge >= 0 || cookies[0].Value != "" {
 		t.Fatalf("logout did not clear session cookie: %#v", cookies)
 	}
-	for _, secret := range []string{"private-refresh-token", "private-access-token", "private-id-token", "session-id", "csrf"} {
+	for _, secret := range []string{"private-refresh-token", "private-access-token", "private-id-token", browserTestSessionID, "csrf"} {
 		if strings.Contains(response.Body.String(), secret) {
 			t.Fatal("logout response leaked credentials")
 		}
@@ -466,7 +568,7 @@ func TestLogoutClearsLocalSessionRevokesRefreshAndReturnsEndSessionURL(t *testin
 func TestLogoutFailureStillRemovesLocalSessionWithoutClaimingSuccess(t *testing.T) {
 	f := newBrowserFixture(t)
 	f.provider.revokeErr = identity.ErrOIDCUnavailable
-	f.sessions.record = session.Record{ID: "session-id", AccountID: "account", CSRFToken: "csrf", ExpiresAt: browserTestNow.Add(time.Hour), Tokens: f.provider.tokens}
+	f.sessions.record = session.Record{ID: browserTestSessionID, AccountID: "account", CSRFToken: "csrf", ExpiresAt: browserTestNow.Add(time.Hour), Tokens: f.provider.tokens}
 	response := f.request(http.MethodPost, "/auth/logout", `{}`, func(r *http.Request) {
 		r.AddCookie(&http.Cookie{Name: SessionCookieName, Value: f.sessions.record.ID})
 		r.Header.Set("Origin", "https://tunnel.example.test")
@@ -490,6 +592,7 @@ func TestNewRejectsMissingDependenciesAndUnsafeOrigins(t *testing.T) {
 		func(options *Options) { options.PublicOrigin = "https://user:secret@tunnel.example.test" },
 		func(options *Options) { options.PublicOrigin = "https://tunnel.example.test/path" },
 		func(options *Options) { options.PublicOrigin = "https://tunnel.example.test?query=1" },
+		func(options *Options) { options.PublicOrigin = "https://tunnel.example.test?" },
 		func(options *Options) { options.Provider = nil },
 		func(options *Options) { options.Sessions = nil },
 		func(options *Options) { options.Accounts = nil },

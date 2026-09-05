@@ -26,9 +26,14 @@ const (
 	loginLifetime     = 5 * time.Minute
 	sessionLifetime   = 24 * time.Hour
 	maxLogoutBody     = 4096
+	maxLoginQuery     = 8 << 10
+	maxCallbackQuery  = 16 << 10
 )
 
-var ErrInvalidConfiguration = errors.New("invalid BFF configuration")
+var (
+	ErrInvalidConfiguration = errors.New("invalid BFF configuration")
+	errQueryTooLarge        = errors.New("query too large")
+)
 
 type OIDCProvider interface {
 	AuthorizationURL(state, nonce, verifier, locale string) (string, error)
@@ -114,7 +119,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	returnTo, locale, ok := parseLoginQuery(r.URL.Query())
+	query, err := parseBoundedQuery(r.URL.RawQuery, maxLoginQuery)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	returnTo, locale, ok := parseLoginQuery(query)
 	if !ok {
 		s.writeError(w, http.StatusBadRequest, "invalid_request")
 		return
@@ -211,35 +221,50 @@ func canonicalLocale(raw string) (string, bool) {
 }
 
 func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
-	code, state, ok := singleNonEmpty(r.URL.Query(), "code", "state")
-	if !ok {
+	query, err := parseBoundedQuery(r.URL.RawQuery, maxCallbackQuery)
+	if err != nil {
+		s.writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	code, state, ok := singleNonEmpty(query, "code", "state")
+	if !ok || !validAuthorizationCode(code) || !validRandomToken(state) {
 		s.writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	cookie, err := r.Cookie(loginCookieName(state))
-	if err != nil || cookie.Value == "" {
+	if err != nil || !validRandomToken(cookie.Value) {
 		s.writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	s.clearLoginCookie(w, state)
 	login, err := s.sessions.ConsumeLogin(r.Context(), state, cookie.Value)
 	if err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeDependencyError(w, err)
 		return
 	}
 	tokens, err := s.provider.Exchange(r.Context(), code, login.Verifier, login.Nonce)
 	if err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeDependencyError(w, err)
 		return
 	}
-	if tokens.RefreshToken == "" || tokens.Identity.Issuer == "" || tokens.Identity.Subject == "" {
-		s.writeError(w, http.StatusUnauthorized, "unauthorized")
+	if tokens.RefreshToken == "" {
+		s.writeError(w, http.StatusServiceUnavailable, "dependency_unavailable")
+		return
+	}
+	if tokens.Identity.Issuer == "" || tokens.Identity.Subject == "" {
+		_ = s.provider.Revoke(r.Context(), tokens.RefreshToken)
+		s.writeError(w, http.StatusServiceUnavailable, "dependency_unavailable")
 		return
 	}
 	account, err := s.accounts.ResolveAccount(r.Context(), tokens.Identity.Issuer, tokens.Identity.Subject)
-	if err != nil || account.ID == "" {
+	if err != nil {
 		_ = s.provider.Revoke(r.Context(), tokens.RefreshToken)
 		s.writeDependencyError(w, err)
+		return
+	}
+	if account.ID == "" || account.IdentityIssuer != tokens.Identity.Issuer || account.IdentitySubject != tokens.Identity.Subject {
+		_ = s.provider.Revoke(r.Context(), tokens.RefreshToken)
+		s.writeError(w, http.StatusServiceUnavailable, "dependency_unavailable")
 		return
 	}
 	sessionID, err := s.randomToken(32)
@@ -268,6 +293,13 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, login.ReturnTo, http.StatusSeeOther)
 }
 
+func parseBoundedQuery(raw string, limit int) (url.Values, error) {
+	if len(raw) > limit {
+		return nil, errQueryTooLarge
+	}
+	return url.ParseQuery(raw)
+}
+
 func singleNonEmpty(query url.Values, first, second string) (string, string, bool) {
 	for key := range query {
 		if key != first && key != second {
@@ -284,6 +316,11 @@ func singleNonEmpty(query url.Values, first, second string) (string, string, boo
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie(SessionCookieName)
 	if err != nil || cookie.Value == "" {
+		s.writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
+		return
+	}
+	if !validRandomToken(cookie.Value) {
+		s.clearSessionCookie(w)
 		s.writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
 		return
 	}
@@ -312,13 +349,13 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie(SessionCookieName)
-	if err != nil || cookie.Value == "" {
+	if err != nil || !validRandomToken(cookie.Value) {
 		s.writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	record, err := s.sessions.ReadSession(r.Context(), cookie.Value)
 	if err != nil {
-		s.writeAuthenticationError(w, err)
+		s.writeDependencyError(w, err)
 		return
 	}
 	if !s.validateBrowserWrite(w, r, record.CSRFToken) {
@@ -392,6 +429,18 @@ func (s *Server) randomToken(bytes int) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buffer), nil
 }
 
+func validRandomToken(value string) bool {
+	if len(value) != 43 || strings.TrimSpace(value) != value {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	return err == nil && len(decoded) == 32 && base64.RawURLEncoding.EncodeToString(decoded) == value
+}
+
+func validAuthorizationCode(code string) bool {
+	return code != "" && len(code) <= 4096 && strings.TrimSpace(code) == code && !strings.ContainsAny(code, "\x00\r\n")
+}
+
 func loginCookieName(state string) string {
 	digest := sha256.Sum256([]byte(state))
 	return loginCookiePrefix + hex.EncodeToString(digest[:8])
@@ -413,14 +462,6 @@ func (s *Server) clearSessionCookie(w http.ResponseWriter) { s.clearCookie(w, Se
 
 func (s *Server) clearCookie(w http.ResponseWriter, name string) {
 	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", MaxAge: -1, Expires: time.Unix(1, 0).UTC(), Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
-}
-
-func (s *Server) writeAuthenticationError(w http.ResponseWriter, err error) {
-	if errors.Is(err, identity.ErrOIDCUnavailable) || errors.Is(err, session.ErrUnavailable) {
-		s.writeError(w, http.StatusServiceUnavailable, "dependency_unavailable")
-		return
-	}
-	s.writeError(w, http.StatusUnauthorized, "unauthorized")
 }
 
 func (s *Server) writeDependencyError(w http.ResponseWriter, err error) {
