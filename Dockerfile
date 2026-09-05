@@ -16,7 +16,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=frontend-build /src/web/dist ./internal/server/assets/web
-RUN sh ./deploy/build-client-assets.sh "$VERSION" /out/releases
+RUN sed -i 's/\r$//' ./deploy/build-client-assets.sh && \
+    sh ./deploy/build-client-assets.sh "$VERSION" /out/releases
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
     -ldflags="-s -w -X main.version=$VERSION" -o /out/tunneld ./cmd/tunneld
 
