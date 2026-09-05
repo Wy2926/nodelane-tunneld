@@ -4,6 +4,7 @@
 package frpplugin
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,10 @@ import (
 )
 
 const APIVersion = "0.1.0"
+
+const MaxRequestBytes = 64 << 10
+
+var ErrRequestTooLarge = errors.New("callback request is too large")
 
 type Operation string
 
@@ -43,7 +48,18 @@ type Request struct {
 // puts them in the query string and in the JSON envelope.
 func DecodeRequest(reader io.Reader, queryVersion, queryOp string) (Request, error) {
 	var request Request
-	decoder := json.NewDecoder(reader)
+	data, err := io.ReadAll(io.LimitReader(reader, MaxRequestBytes+1))
+	if err != nil {
+		return request, fmt.Errorf("read callback envelope: %w", err)
+	}
+	if len(data) > MaxRequestBytes {
+		return request, ErrRequestTooLarge
+	}
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return request, fmt.Errorf("validate callback envelope: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
 		return request, fmt.Errorf("decode callback envelope: %w", err)
 	}
@@ -70,8 +86,91 @@ func DecodeRequest(reader io.Reader, queryVersion, queryOp string) (Request, err
 }
 
 func (r Request) DecodeContent(target any) error {
-	if err := json.Unmarshal(r.Content, target); err != nil {
+	if err := rejectDuplicateJSONKeys(r.Content); err != nil {
+		return fmt.Errorf("validate %s callback content: %w", r.Op, err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(r.Content))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("decode %s callback content: %w", r.Op, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("decode %s callback content: multiple JSON values", r.Op)
+		}
+		return fmt.Errorf("decode %s callback content trailer: %w", r.Op, err)
+	}
+	return nil
+}
+
+func rejectDuplicateJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := scanJSONValue(decoder); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func scanJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("JSON object key is not a string")
+			}
+			if _, exists := seen[key]; exists {
+				return fmt.Errorf("duplicate JSON object key %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := scanJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if closing != json.Delim('}') {
+			return errors.New("invalid JSON object closing delimiter")
+		}
+	case '[':
+		for decoder.More() {
+			if err := scanJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if closing != json.Delim(']') {
+			return errors.New("invalid JSON array closing delimiter")
+		}
+	default:
+		return errors.New("invalid JSON opening delimiter")
 	}
 	return nil
 }
