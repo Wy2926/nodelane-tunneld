@@ -40,7 +40,7 @@ func (c *OIDCClient) VerifyNative(ctx context.Context, raw string) (OIDCIdentity
 }
 
 func (c *OIDCClient) verifyWeb(ctx context.Context, raw, nonce string) (OIDCIdentity, error) {
-	claims, err := c.verifyClaims(ctx, raw, c.oauth.ClientID, "")
+	claims, err := c.verifyClaims(ctx, raw, c.oauth.ClientID, "", "JWT")
 	if err != nil {
 		return OIDCIdentity{}, err
 	}
@@ -56,7 +56,7 @@ func (c *OIDCClient) verifyWeb(ctx context.Context, raw, nonce string) (OIDCIden
 	return claims.identity(c.oauth.ClientID), nil
 }
 
-func (c *OIDCClient) verifyClaims(ctx context.Context, raw, audience, tokenType string) (oidcTokenClaims, error) {
+func (c *OIDCClient) verifyClaims(ctx context.Context, raw, audience string, allowedTokenTypes ...string) (oidcTokenClaims, error) {
 	var claims oidcTokenClaims
 	if raw == "" || len(raw) > oidcMaxResponseBytes {
 		return claims, ErrOIDCUnauthorized
@@ -65,7 +65,7 @@ func (c *OIDCClient) verifyClaims(ctx context.Context, raw, audience, tokenType 
 	if err != nil || len(jws.Signatures) != 1 || jws.Signatures[0].Protected.Algorithm != string(jose.RS256) {
 		return claims, ErrOIDCUnauthorized
 	}
-	if tokenType != "" && jws.Signatures[0].Protected.ExtraHeaders[jose.HeaderType] != tokenType {
+	if !oidcTokenTypeAllowed(jws.Signatures[0].Protected.ExtraHeaders[jose.HeaderType], allowedTokenTypes) {
 		return claims, ErrOIDCUnauthorized
 	}
 	payload, err := c.keys.VerifySignature(ctx, raw)
@@ -88,6 +88,23 @@ func (c *OIDCClient) verifyClaims(ctx context.Context, raw, audience, tokenType 
 		return oidcTokenClaims{}, ErrOIDCUnauthorized
 	}
 	return claims, nil
+}
+
+func oidcTokenTypeAllowed(raw any, allowed []string) bool {
+	tokenType := ""
+	if raw != nil {
+		var ok bool
+		tokenType, ok = raw.(string)
+		if !ok {
+			return false
+		}
+	}
+	for _, allowedType := range allowed {
+		if tokenType == allowedType {
+			return true
+		}
+	}
+	return false
 }
 
 func (c oidcTokenClaims) identity(clientID string) OIDCIdentity {

@@ -67,6 +67,19 @@ func NewOIDCClient(ctx context.Context, opts OIDCOptions) (*OIDCClient, error) {
 	if provider.Claims(&metadata) != nil {
 		return nil, ErrOIDCConfiguration
 	}
+	for _, capability := range []struct {
+		field    string
+		required []string
+	}{
+		{"code_challenge_methods_supported", []string{"S256"}},
+		{"id_token_signing_alg_values_supported", []string{"RS256"}},
+		{"grant_types_supported", []string{"authorization_code", "refresh_token"}},
+		{"token_endpoint_auth_methods_supported", []string{"client_secret_basic"}},
+	} {
+		if !oidcMetadataSupports(metadata, capability.field, capability.required...) {
+			return nil, ErrOIDCConfiguration
+		}
+	}
 	endpoints := make(map[string]string)
 	for name, raw := range metadata {
 		if name != "jwks_uri" && !strings.HasSuffix(name, "_endpoint") {
@@ -105,6 +118,30 @@ func NewOIDCClient(ctx context.Context, opts OIDCOptions) (*OIDCClient, error) {
 	}, nil
 }
 
+func oidcMetadataSupports(metadata map[string]json.RawMessage, field string, required ...string) bool {
+	raw, ok := metadata[field]
+	if !ok {
+		return false
+	}
+	var supported []string
+	if json.Unmarshal(raw, &supported) != nil {
+		return false
+	}
+	for _, requirement := range required {
+		found := false
+		for _, value := range supported {
+			if value == requirement {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 // AuthorizationURL leaves state generation and browser binding to the caller.
 func (c *OIDCClient) AuthorizationURL(state, nonce, verifier, locale string) (string, error) {
 	if strings.TrimSpace(state) == "" || strings.TrimSpace(nonce) == "" || !validOIDCVerifier(verifier) {
@@ -124,6 +161,9 @@ func (c *OIDCClient) Exchange(ctx context.Context, code, verifier, nonce string)
 	token, err := c.oauth.Exchange(oidc.ClientContext(ctx, c.http), code, oauth2.VerifierOption(verifier))
 	if err != nil {
 		return OIDCTokens{}, oidcOAuthError(err)
+	}
+	if strings.TrimSpace(token.RefreshToken) == "" {
+		return OIDCTokens{}, ErrOIDCUnauthorized
 	}
 	idToken, ok := token.Extra("id_token").(string)
 	if !ok || idToken == "" {
@@ -211,7 +251,7 @@ func (c *OIDCClient) EndSessionURL(locale string) (string, error) {
 
 func (c *OIDCClient) tokens(token *oauth2.Token, idToken string, identity OIDCIdentity) (OIDCTokens, error) {
 	const maxExpirySeconds = int64((1<<63 - 1) / time.Second)
-	if token.AccessToken == "" || !strings.EqualFold(token.TokenType, "Bearer") || token.ExpiresIn <= 0 || token.ExpiresIn > maxExpirySeconds {
+	if strings.TrimSpace(token.AccessToken) == "" || strings.TrimSpace(token.RefreshToken) == "" || !strings.EqualFold(token.TokenType, "Bearer") || token.ExpiresIn <= 0 || token.ExpiresIn > maxExpirySeconds {
 		return OIDCTokens{}, ErrOIDCUnavailable
 	}
 	return OIDCTokens{

@@ -287,6 +287,50 @@ func TestOIDCClientRejectsUnsafeDiscovery(t *testing.T) {
 	}
 }
 
+func TestOIDCClientRejectsMissingOrUnsupportedProviderCapabilities(t *testing.T) {
+	f := newOIDCTestProvider(t)
+	cases := []struct {
+		name  string
+		field string
+		value any
+	}{
+		{"missing S256 declaration", "code_challenge_methods_supported", nil},
+		{"plain PKCE only", "code_challenge_methods_supported", []string{"plain"}},
+		{"missing RS256 declaration", "id_token_signing_alg_values_supported", nil},
+		{"ES256 signing only", "id_token_signing_alg_values_supported", []string{"ES256"}},
+		{"missing grant declaration", "grant_types_supported", nil},
+		{"authorization code grant only", "grant_types_supported", []string{"authorization_code"}},
+		{"refresh token grant only", "grant_types_supported", []string{"refresh_token"}},
+		{"missing client authentication declaration", "token_endpoint_auth_methods_supported", nil},
+		{"post body client authentication only", "token_endpoint_auth_methods_supported", []string{"client_secret_post", "none"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f.mu.Lock()
+			original, existed := f.metadata[tc.field]
+			if tc.value == nil {
+				delete(f.metadata, tc.field)
+			} else {
+				f.metadata[tc.field] = tc.value
+			}
+			f.mu.Unlock()
+
+			_, err := NewOIDCClient(context.Background(), f.options())
+
+			f.mu.Lock()
+			if existed {
+				f.metadata[tc.field] = original
+			} else {
+				delete(f.metadata, tc.field)
+			}
+			f.mu.Unlock()
+			if !errors.Is(err, ErrOIDCConfiguration) {
+				t.Fatalf("got %v, want configuration error", err)
+			}
+		})
+	}
+}
+
 func TestOIDCExchangeUsesBasicPKCEAndVerifiedIdentity(t *testing.T) {
 	f := newOIDCTestProvider(t)
 	c := f.client()
@@ -304,6 +348,25 @@ func TestOIDCExchangeUsesBasicPKCEAndVerifiedIdentity(t *testing.T) {
 	want := url.Values{"grant_type": {"authorization_code"}, "code": {"code-test-only"}, "code_verifier": {oidcTestVerifier}, "redirect_uri": {"https://tunnel.example/auth/callback"}}
 	if len(requests) != 1 || requests[0].Method != "POST" || requests[0].User != "web-app" || requests[0].Secret != "web-secret-test-only" || !reflect.DeepEqual(requests[0].Form, want) {
 		t.Fatal("exchange did not send one Basic-authenticated PKCE request without a resource")
+	}
+}
+
+func TestOIDCExchangeRequiresRefreshTokenForServerSession(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value any
+	}{{"missing", nil}, {"empty", ""}, {"blank", " "}} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newOIDCTestProvider(t)
+			if test.value == nil {
+				delete(f.token, "refresh_token")
+			} else {
+				f.token["refresh_token"] = test.value
+			}
+			if _, err := f.client().Exchange(context.Background(), "code", oidcTestVerifier, "nonce-123"); !errors.Is(err, ErrOIDCUnauthorized) {
+				t.Fatalf("missing refresh token returned %v, want unauthorized", err)
+			}
+		})
 	}
 }
 
@@ -351,6 +414,27 @@ func TestOIDCWebTokenRejectsInvalidClaims(t *testing.T) {
 	f.mu.Unlock()
 	if _, err := c.Exchange(context.Background(), "code", oidcTestVerifier, "nonce-123"); err != nil {
 		t.Fatalf("valid azp and 30 second skew: %v", err)
+	}
+}
+
+func TestOIDCWebTokenTypeAllowsMissingOrJWTOnly(t *testing.T) {
+	for _, typ := range []string{"", "JWT"} {
+		t.Run("allowed/"+typ, func(t *testing.T) {
+			f := newOIDCTestProvider(t)
+			f.token = f.tokenResponse(f.sign(f.idClaims(), typ, "first", f.key))
+			if _, err := f.client().Exchange(context.Background(), "code", oidcTestVerifier, "nonce-123"); err != nil {
+				t.Fatalf("web ID token typ %q rejected: %v", typ, err)
+			}
+		})
+	}
+	for _, typ := range []string{"at+jwt", "application/at+jwt", "jwt", "other"} {
+		t.Run("rejected/"+typ, func(t *testing.T) {
+			f := newOIDCTestProvider(t)
+			f.token = f.tokenResponse(f.sign(f.idClaims(), typ, "first", f.key))
+			if _, err := f.client().Exchange(context.Background(), "code", oidcTestVerifier, "nonce-123"); !errors.Is(err, ErrOIDCUnauthorized) {
+				t.Fatalf("web ID token typ %q returned %v, want unauthorized", typ, err)
+			}
+		})
 	}
 }
 
