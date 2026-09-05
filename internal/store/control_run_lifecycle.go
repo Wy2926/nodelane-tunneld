@@ -155,6 +155,9 @@ func (p *ControlPostgres) ConfirmOffline(ctx context.Context, evidence domain.Ru
 		if err != nil {
 			return err
 		}
+		if _, err := tx.ExecContext(ctx, `UPDATE run_credentials SET revoked_at=$2 WHERE id=$1 AND revoked_at IS NULL`, credential.ID, now); err != nil {
+			return err
+		}
 		result, err = scanControlRun(tx.QueryRowContext(ctx, `UPDATE tunnel_runs SET status='offline',stopped_at=$2 WHERE id=$1 RETURNING `+controlRunColumns, run.ID, now))
 		return err
 	})
