@@ -121,6 +121,19 @@ func TestFrontendServesLocalizedPagesAndSEOFiles(t *testing.T) {
 		if !strings.Contains(body, script.contains) || strings.Contains(body, "ft_") {
 			t.Fatalf("%s does not contain %q or references retired assets", scriptPath, script.contains)
 		}
+		if scriptPath == "/run.sh" && strings.ContainsRune(body, '\r') {
+			t.Fatalf("%s contains carriage returns; POSIX shell scripts must use LF line endings", scriptPath)
+		}
+	}
+}
+
+func TestEmbeddedPOSIXBootstrapUsesUnixLineEndings(t *testing.T) {
+	data, err := publicAssets.ReadFile("assets/run.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.ContainsRune(data, '\r') {
+		t.Fatal("embedded assets/run.sh contains carriage returns; keep the source file LF-only")
 	}
 }
 

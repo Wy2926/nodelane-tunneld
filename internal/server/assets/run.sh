@@ -1,4 +1,5 @@
 #!/bin/sh
+# This script is piped directly to POSIX sh; keep its published bytes LF-only.
 set -eu
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then

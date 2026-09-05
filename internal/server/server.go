@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"embed"
@@ -557,6 +558,10 @@ func (s *Server) runScript(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.internalError(w, "read bootstrap script", err)
 		return
+	}
+	if name == "assets/run.sh" {
+		data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+		data = bytes.ReplaceAll(data, []byte("\r"), []byte("\n"))
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", "inline")

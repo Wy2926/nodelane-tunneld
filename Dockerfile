@@ -32,7 +32,8 @@ ARG TARGETARCH
 ARG VERSION=dev
 COPY . .
 COPY --from=frontend-build /src/web/dist ./internal/server/assets/web
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
+RUN sed -i 's/\r$//' ./internal/server/assets/run.sh && \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
     -ldflags="-s -w -X main.version=$VERSION" -o /out/tunneld ./cmd/tunneld
 
 FROM gcr.io/distroless/static-debian12:nonroot
