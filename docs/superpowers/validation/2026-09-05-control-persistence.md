@@ -6,6 +6,7 @@
 - Reviewed task commits: infrastructure `a94adad`, account/routes `49a1db7`, runs/replay `3554cb2`, and panic cleanup `8009b8d`.
 - Joined cross-operation tests: `eb86b71`, on local `codex/auth-console`.
 - Final reviewed code: `7598f5d`, including atomic confirmed-offline credential revocation. No open data-layer review findings remain.
+- User-authorized local main merge: fast-forward `3752c6d` to `fe46d4d` on 2026-09-05. Fresh real-PostgreSQL full tests passed before merge (store 28.055s) and on main afterward (store 28.293s); `go vet ./...` passed on main. No push or runtime deployment occurred.
 - This is the registered persistent data layer only. The legacy store and server wiring have not been switched.
 
 ## Delivered Boundary
