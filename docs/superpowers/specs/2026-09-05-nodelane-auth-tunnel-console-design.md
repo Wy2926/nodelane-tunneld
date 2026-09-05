@@ -1,9 +1,9 @@
 # NodeLane 统一登录与 Tunnel 控制台 MVP 设计
 
 - 日期：2026-09-05
-- 状态：已按本次对话确认的范围修订，等待修订版最终审阅
+- 状态：修订版已获用户最终确认，作为分阶段实施的约束
 - 总体范围：`D:\Project\nodelane\auth`、`D:\Project\nodelane\nodelane-www`、`D:\Project\nodelane\nodelane-tunneld`
-- 实施状态：未开始
+- 实施状态：正在编写分阶段实施计划，业务代码尚未开始
 
 ### 本次确认记录
 
