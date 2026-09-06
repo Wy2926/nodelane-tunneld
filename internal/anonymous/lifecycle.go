@@ -8,6 +8,19 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// AuthorizeLogin authenticates the run credential before frps creates or reuses
+// a control connection. Proxy-bound callbacks must use Authorize instead.
+func (s *Store) AuthorizeLogin(ctx context.Context, runID, credentialToken string) (Run, error) {
+	run, code, err := s.runOperation(ctx, "authorize", runID, credentialToken, "")
+	if err != nil {
+		return Run{}, err
+	}
+	if code == -4 {
+		return Run{}, ErrRunExpired
+	}
+	return run, mapRunOperationCode(code)
+}
+
 func (s *Store) Authorize(ctx context.Context, runID, credentialToken, proxyName string) (Run, error) {
 	if !validRandomIdentifier(proxyName, "anon_", 16) {
 		return Run{}, ErrInvalidCredential

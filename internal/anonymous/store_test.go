@@ -579,6 +579,36 @@ func TestCredentialAndProxyAreBoundToRunAndAllMutationsFailClosed(t *testing.T) 
 	}
 }
 
+func TestAuthorizeLoginAuthenticatesRunWithoutProxyAndPreservesLifecycle(t *testing.T) {
+	f := newRedisFixture(t, nil)
+	f.ready(t)
+	allocation, err := f.store.Allocate(context.Background(), allocationRequest("login-authorization"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	run, err := f.store.AuthorizeLogin(context.Background(), allocation.RunID, allocation.CredentialToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.RunID != allocation.RunID || run.ProxyName != allocation.ProxyName || run.State != StateReserved || !run.LeaseExpiresAt.IsZero() {
+		t.Fatalf("login authorization mutated or returned wrong run: %#v", run)
+	}
+
+	wrong := allocation.CredentialToken[:len(allocation.CredentialToken)-1] + "A"
+	if wrong == allocation.CredentialToken {
+		wrong = allocation.CredentialToken[:len(allocation.CredentialToken)-1] + "B"
+	}
+	if _, err := f.store.AuthorizeLogin(context.Background(), allocation.RunID, wrong); !errors.Is(err, ErrInvalidCredential) {
+		t.Fatalf("wrong login credential accepted: %v", err)
+	}
+
+	f.clock.Set(allocation.ConnectDeadlineAt)
+	if _, err := f.store.AuthorizeLogin(context.Background(), allocation.RunID, allocation.CredentialToken); !errors.Is(err, ErrRunExpired) {
+		t.Fatalf("login authorized at exact connect deadline: %v", err)
+	}
+}
+
 func TestRequestStopRejectsCorruptRunStateWithoutReleasingOwnership(t *testing.T) {
 	f := newRedisFixture(t, nil)
 	f.ready(t)
