@@ -4,6 +4,7 @@ package frpauth
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"reflect"
 	"strings"
@@ -60,6 +61,9 @@ func nilRepository(repository Repository) bool {
 }
 
 func (a *Authorizer) Login(ctx context.Context, content frpplugin.LoginContent) (frpplugin.LoginContent, domain.RunAuthorization, error) {
+	if !directProofMatches(content.PrivilegeKey, content.Metas) {
+		return frpplugin.LoginContent{}, domain.RunAuthorization{}, ErrInvalidCredential
+	}
 	authorization, err := a.authorize(ctx, content.Metas)
 	if err != nil {
 		return frpplugin.LoginContent{}, domain.RunAuthorization{}, err
@@ -88,25 +92,38 @@ func (a *Authorizer) NewProxy(ctx context.Context, content frpplugin.NewProxyCon
 }
 
 func (a *Authorizer) Ping(ctx context.Context, content frpplugin.PingContent) (domain.RunAuthorization, error) {
+	if !directProofMatches(content.PrivilegeKey, content.User.Metas) {
+		return domain.RunAuthorization{}, ErrInvalidCredential
+	}
 	authorization, err := a.authorize(ctx, content.User.Metas)
 	if err != nil {
 		return domain.RunAuthorization{}, err
 	}
-	if content.User.User != "" {
+	if content.User.User != "" || content.User.RunID != authorization.Run.ID {
 		return domain.RunAuthorization{}, ErrInvalidCredential
 	}
 	return authorization, nil
 }
 
 func (a *Authorizer) NewWorkConn(ctx context.Context, content frpplugin.NewWorkConnContent) (domain.RunAuthorization, error) {
+	if !directProofMatches(content.PrivilegeKey, content.User.Metas) {
+		return domain.RunAuthorization{}, ErrInvalidCredential
+	}
 	authorization, err := a.authorize(ctx, content.User.Metas)
 	if err != nil {
 		return domain.RunAuthorization{}, err
 	}
-	if content.User.User != "" || content.RunID != "" && content.User.RunID != "" && content.RunID != content.User.RunID {
+	if content.User.User != "" || content.RunID != authorization.Run.ID || content.User.RunID != authorization.Run.ID {
 		return domain.RunAuthorization{}, ErrInvalidCredential
 	}
 	return authorization, nil
+}
+
+// NewWorkConn inherits User.Metas from frps's existing session. Only its own
+// PrivilegeKey demonstrates that the arriving connection possesses the secret.
+func directProofMatches(token string, metas map[string]string) bool {
+	proof, ok := runProof(metas)
+	return ok && token != "" && len(token) == len(proof.Token) && subtle.ConstantTimeCompare([]byte(token), []byte(proof.Token)) == 1
 }
 
 func (a *Authorizer) NewUserConn(ctx context.Context, content frpplugin.NewUserConnContent) (domain.RunAuthorization, error) {

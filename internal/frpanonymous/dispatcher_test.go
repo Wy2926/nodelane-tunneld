@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,6 +12,10 @@ import (
 
 	"github.com/Wy2926/nodelane-tunneld/internal/anonymous"
 	"github.com/Wy2926/nodelane-tunneld/internal/frpplugin"
+	"github.com/fatedier/frp/pkg/auth"
+	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/fatedier/frp/pkg/msg"
+	frputil "github.com/fatedier/frp/pkg/util/util"
 )
 
 const (
@@ -47,7 +52,7 @@ func TestLoginNormalizesAnonymousSessionIdentity(t *testing.T) {
 	dispatcher := mustDispatcher(t, store)
 	input := frpplugin.LoginContent{
 		Version: "0.70.0", Hostname: "developer-machine", OS: "windows", Arch: "amd64",
-		RunID: "client-selected-run", ClientID: "client-selected-id", Metas: testMetas(), PoolCount: 2,
+		RunID: "client-selected-run", ClientID: "client-selected-id", Metas: testMetas(), PoolCount: 2, PrivilegeKey: testRunToken,
 	}
 
 	response, err := dispatcher.Dispatch(context.Background(), request(t, frpplugin.OpLogin, input))
@@ -75,6 +80,88 @@ func TestLoginNormalizesAnonymousSessionIdentity(t *testing.T) {
 	}
 }
 
+func TestWorkConnectionCannotUseInheritedMetadataAsCallerProof(t *testing.T) {
+	store := &recordingStore{run: testRun(anonymous.ProtocolHTTP)}
+	dispatcher := mustDispatcher(t, store)
+	const timestamp = int64(1788652800)
+	// Stock frps supplies User from the existing control session, not from
+	// the newly arriving work connection. This is not caller-owned proof.
+	content := frpplugin.NewWorkConnContent{
+		User: testUser(), RunID: testRunID, Timestamp: timestamp,
+		PrivilegeKey: frputil.GetAuthKey("", timestamp),
+	}
+	response, err := dispatcher.Dispatch(context.Background(), request(t, frpplugin.OpNewWorkConn, content))
+	if err == nil && !response.Reject {
+		t.Fatal("work connection without its own run credential was authorized from inherited session metadata")
+	}
+}
+
+func TestConnectionCallbacksRequireDirectCredentialBeforeStore(t *testing.T) {
+	for _, token := range []string{"", frputil.GetAuthKey("", 0), "nac_dddddddddddddddddddddddddd.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"} {
+		for _, operation := range []frpplugin.Operation{frpplugin.OpLogin, frpplugin.OpPing, frpplugin.OpNewWorkConn} {
+			t.Run(string(operation)+"/"+fmt.Sprint(len(token)), func(t *testing.T) {
+				store := &recordingStore{run: testRun(anonymous.ProtocolHTTP)}
+				var content any
+				switch operation {
+				case frpplugin.OpLogin:
+					content = frpplugin.LoginContent{Metas: testMetas(), PrivilegeKey: token}
+				case frpplugin.OpPing:
+					content = frpplugin.PingContent{User: testUser(), PrivilegeKey: token}
+				case frpplugin.OpNewWorkConn:
+					content = frpplugin.NewWorkConnContent{User: testUser(), RunID: testRunID, PrivilegeKey: token}
+				}
+				response, err := mustDispatcher(t, store).Dispatch(context.Background(), request(t, operation, content))
+				if err != nil || !response.Reject || !response.Unchange || response.Content != nil || len(store.loginCalls) != 0 {
+					t.Fatalf("inherited or mixed proof reached native authorization: %+v %v", response, err)
+				}
+			})
+		}
+	}
+}
+
+func TestAuthorizedAnonymousCallerProofBecomesNativeChecksumIncludingZeroTimestamp(t *testing.T) {
+	verifier := auth.NewTokenAuth([]v1.AuthScope{v1.AuthScopeHeartBeats, v1.AuthScopeNewWorkConns}, "")
+	for _, timestamp := range []int64{0, 1788652800} {
+		for _, operation := range []frpplugin.Operation{frpplugin.OpLogin, frpplugin.OpPing, frpplugin.OpNewWorkConn} {
+			store := &recordingStore{run: testRun(anonymous.ProtocolHTTP)}
+			var content any
+			switch operation {
+			case frpplugin.OpLogin:
+				content = frpplugin.LoginContent{Metas: testMetas(), PrivilegeKey: testRunToken, Timestamp: timestamp}
+			case frpplugin.OpPing:
+				content = frpplugin.PingContent{User: testUser(), PrivilegeKey: testRunToken, Timestamp: timestamp}
+			case frpplugin.OpNewWorkConn:
+				content = frpplugin.NewWorkConnContent{User: testUser(), RunID: testRunID, PrivilegeKey: testRunToken, Timestamp: timestamp}
+			}
+			response, err := mustDispatcher(t, store).Dispatch(context.Background(), request(t, operation, content))
+			if err != nil || response.Reject || response.Unchange || response.Content == nil {
+				t.Fatalf("valid direct proof rejected: %+v %v", response, err)
+			}
+			encoded, err := json.Marshal(response.Content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch operation {
+			case frpplugin.OpLogin:
+				var got msg.Login
+				if json.Unmarshal(encoded, &got) != nil || got.Timestamp != timestamp || verifier.VerifyLogin(&got) != nil {
+					t.Fatal("Login proof is incompatible with stock verifier")
+				}
+			case frpplugin.OpPing:
+				var got msg.Ping
+				if json.Unmarshal(encoded, &got) != nil || got.Timestamp != timestamp || verifier.VerifyPing(&got) != nil {
+					t.Fatal("Ping proof is incompatible with stock verifier")
+				}
+			case frpplugin.OpNewWorkConn:
+				var got msg.NewWorkConn
+				if json.Unmarshal(encoded, &got) != nil || got.Timestamp != timestamp || verifier.VerifyNewWorkConn(&got) != nil {
+					t.Fatal("NewWorkConn proof is incompatible with stock verifier")
+				}
+			}
+		}
+	}
+}
+
 func TestEveryAnonymousCallbackReauthorizesFreshStoreState(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -83,9 +170,9 @@ func TestEveryAnonymousCallbackReauthorizesFreshStoreState(t *testing.T) {
 		wantLoginCalls int
 		wantProxyCalls int
 	}{
-		{name: "Login", op: frpplugin.OpLogin, content: frpplugin.LoginContent{Metas: testMetas()}, wantLoginCalls: 1},
-		{name: "Ping", op: frpplugin.OpPing, content: frpplugin.PingContent{User: testUser()}, wantLoginCalls: 1},
-		{name: "NewWorkConn", op: frpplugin.OpNewWorkConn, content: frpplugin.NewWorkConnContent{User: testUser(), RunID: testRunID}, wantLoginCalls: 1},
+		{name: "Login", op: frpplugin.OpLogin, content: frpplugin.LoginContent{Metas: testMetas(), PrivilegeKey: testRunToken}, wantLoginCalls: 1},
+		{name: "Ping", op: frpplugin.OpPing, content: frpplugin.PingContent{User: testUser(), PrivilegeKey: testRunToken}, wantLoginCalls: 1},
+		{name: "NewWorkConn", op: frpplugin.OpNewWorkConn, content: frpplugin.NewWorkConnContent{User: testUser(), RunID: testRunID, PrivilegeKey: testRunToken}, wantLoginCalls: 1},
 		{name: "NewProxy", op: frpplugin.OpNewProxy, content: validHTTPProxy(), wantProxyCalls: 1},
 		{name: "NewUserConn", op: frpplugin.OpNewUserConn, content: frpplugin.NewUserConnContent{User: testUser(), ProxyName: testProxy, ProxyType: "http", RemoteAddr: "192.0.2.1:4567"}, wantProxyCalls: 1},
 		{name: "CloseProxy", op: frpplugin.OpCloseProxy, content: frpplugin.CloseProxyContent{User: testUser(), ProxyName: testProxy}, wantProxyCalls: 1},
@@ -128,7 +215,7 @@ func TestCredentialMetadataIsExactAndBounded(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			store := &recordingStore{run: testRun(anonymous.ProtocolHTTP)}
 			dispatcher := mustDispatcher(t, store)
-			response, err := dispatcher.Dispatch(context.Background(), request(t, frpplugin.OpLogin, frpplugin.LoginContent{Metas: test.metas}))
+			response, err := dispatcher.Dispatch(context.Background(), request(t, frpplugin.OpLogin, frpplugin.LoginContent{Metas: test.metas, PrivilegeKey: testRunToken}))
 			if err != nil || !response.Reject || response.RejectReason != InvalidCredentialReason || !response.Unchange {
 				t.Fatalf("Dispatch = (%#v, %v), want invalid credential rejection", response, err)
 			}
@@ -306,7 +393,7 @@ func TestInvalidStoreResultsFailClosedAsUnavailable(t *testing.T) {
 			mutation.mutate(&run)
 			store := &recordingStore{run: run}
 			dispatcher := mustDispatcher(t, store)
-			response, err := dispatcher.Dispatch(context.Background(), request(t, frpplugin.OpLogin, frpplugin.LoginContent{Metas: testMetas()}))
+			response, err := dispatcher.Dispatch(context.Background(), request(t, frpplugin.OpLogin, frpplugin.LoginContent{Metas: testMetas(), PrivilegeKey: testRunToken}))
 			if !errors.Is(err, ErrAuthorizationUnavailable) || !response.Reject || response.RejectReason != UnavailableReason {
 				t.Fatalf("Dispatch = (%#v, %v), want unavailable", response, err)
 			}
@@ -333,7 +420,7 @@ func TestStoreErrorsHaveStableSecretFreeClasses(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			store := &recordingStore{err: test.storeError}
 			dispatcher := mustDispatcher(t, store)
-			response, err := dispatcher.Dispatch(context.Background(), request(t, frpplugin.OpPing, frpplugin.PingContent{User: testUser()}))
+			response, err := dispatcher.Dispatch(context.Background(), request(t, frpplugin.OpPing, frpplugin.PingContent{User: testUser(), PrivilegeKey: testRunToken}))
 			if response.RejectReason != test.wantReason || !response.Reject || !response.Unchange {
 				t.Fatalf("response = %#v", response)
 			}
@@ -370,10 +457,10 @@ func TestCallbackSpecificSessionFieldsAreValidated(t *testing.T) {
 		op      frpplugin.Operation
 		content any
 	}{
-		{name: "Login user namespace", op: frpplugin.OpLogin, content: frpplugin.LoginContent{User: "account", Metas: testMetas()}},
-		{name: "Ping user namespace", op: frpplugin.OpPing, content: frpplugin.PingContent{User: frpplugin.UserInfo{User: "account", Metas: testMetas(), RunID: testRunID}}},
-		{name: "Ping wrong session", op: frpplugin.OpPing, content: frpplugin.PingContent{User: frpplugin.UserInfo{Metas: testMetas(), RunID: "anr_zzzzzzzzzzzzzzzzzzzzzzzzzz"}}},
-		{name: "work connection wrong outer session", op: frpplugin.OpNewWorkConn, content: frpplugin.NewWorkConnContent{User: testUser(), RunID: "anr_zzzzzzzzzzzzzzzzzzzzzzzzzz"}},
+		{name: "Login user namespace", op: frpplugin.OpLogin, content: frpplugin.LoginContent{User: "account", Metas: testMetas(), PrivilegeKey: testRunToken}},
+		{name: "Ping user namespace", op: frpplugin.OpPing, content: frpplugin.PingContent{User: frpplugin.UserInfo{User: "account", Metas: testMetas(), RunID: testRunID}, PrivilegeKey: testRunToken}},
+		{name: "Ping wrong session", op: frpplugin.OpPing, content: frpplugin.PingContent{User: frpplugin.UserInfo{Metas: testMetas(), RunID: "anr_zzzzzzzzzzzzzzzzzzzzzzzzzz"}, PrivilegeKey: testRunToken}},
+		{name: "work connection wrong outer session", op: frpplugin.OpNewWorkConn, content: frpplugin.NewWorkConnContent{User: testUser(), RunID: "anr_zzzzzzzzzzzzzzzzzzzzzzzzzz", PrivilegeKey: testRunToken}},
 		{name: "close wrong proxy", op: frpplugin.OpCloseProxy, content: frpplugin.CloseProxyContent{User: testUser(), ProxyName: "anon_eeeeeeeeeeeeeeeeeeeeeeeeee"}},
 	}
 	for _, test := range tests {

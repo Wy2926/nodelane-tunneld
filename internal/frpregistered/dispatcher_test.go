@@ -10,7 +10,48 @@ import (
 	"github.com/Wy2926/nodelane-tunneld/internal/domain"
 	"github.com/Wy2926/nodelane-tunneld/internal/frpauth"
 	"github.com/Wy2926/nodelane-tunneld/internal/frpplugin"
+	"github.com/fatedier/frp/pkg/auth"
+	v1 "github.com/fatedier/frp/pkg/config/v1"
+	"github.com/fatedier/frp/pkg/msg"
 )
+
+func TestAuthorizedConnectionProofsBecomeStockCompatibleWithoutChangingTimestamp(t *testing.T) {
+	verifier := auth.NewTokenAuth([]v1.AuthScope{v1.AuthScopeHeartBeats, v1.AuthScopeNewWorkConns}, "")
+	for _, timestamp := range []int64{0, 1788652800} {
+		for _, operation := range []frpplugin.Operation{frpplugin.OpLogin, frpplugin.OpPing, frpplugin.OpNewWorkConn} {
+			authorizer := &recordingAuthorizer{login: frpplugin.LoginContent{PrivilegeKey: "direct-run-proof", Timestamp: timestamp}}
+			content, err := json.Marshal(map[string]any{"privilege_key": "direct-run-proof", "timestamp": timestamp})
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := mustDispatcher(t, authorizer).Dispatch(context.Background(), frpplugin.Request{Op: operation, Content: content})
+			if err != nil || response.Reject || response.Unchange || response.Content == nil {
+				t.Fatalf("authorized %s proof was not converted: %+v %v", operation, response, err)
+			}
+			encoded, err := json.Marshal(response.Content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch operation {
+			case frpplugin.OpLogin:
+				var got msg.Login
+				if json.Unmarshal(encoded, &got) != nil || got.Timestamp != timestamp || verifier.VerifyLogin(&got) != nil {
+					t.Fatal("Login proof is incompatible with stock verifier")
+				}
+			case frpplugin.OpPing:
+				var got msg.Ping
+				if json.Unmarshal(encoded, &got) != nil || got.Timestamp != timestamp || verifier.VerifyPing(&got) != nil {
+					t.Fatal("Ping proof is incompatible with stock verifier")
+				}
+			case frpplugin.OpNewWorkConn:
+				var got msg.NewWorkConn
+				if json.Unmarshal(encoded, &got) != nil || got.Timestamp != timestamp || verifier.VerifyNewWorkConn(&got) != nil {
+					t.Fatal("NewWorkConn proof is incompatible with stock verifier")
+				}
+			}
+		}
+	}
+}
 
 type recordingAuthorizer struct {
 	err      error
@@ -61,8 +102,9 @@ func TestDispatcherInvokesRegisteredAuthorizerForEveryAuthorizationCallback(t *t
 			if err != nil {
 				t.Fatalf("Dispatch: %v", err)
 			}
-			if response.Reject || !response.Unchange || response.Content != nil {
-				t.Fatalf("response = %#v, want allowed unchanged", response)
+			changed := test.op == frpplugin.OpPing || test.op == frpplugin.OpNewWorkConn
+			if response.Reject || response.Unchange == changed || (response.Content != nil) != changed {
+				t.Fatalf("response = %#v, unexpected native proof transformation", response)
 			}
 			if len(authorizer.calls) != 1 || authorizer.calls[0] != test.op {
 				t.Fatalf("calls = %#v, want %s", authorizer.calls, test.op)
@@ -83,7 +125,11 @@ func TestDispatcherReturnsNormalizedChangedLogin(t *testing.T) {
 		t.Fatalf("response = %#v, want allowed changed", response)
 	}
 	got, ok := response.Content.(frpplugin.LoginContent)
-	if !ok || !reflect.DeepEqual(got, modified) {
+	if !ok || got.PrivilegeKey == "" {
+		t.Fatal("normalized Login has no stock native proof")
+	}
+	got.PrivilegeKey = modified.PrivilegeKey
+	if !reflect.DeepEqual(got, modified) {
 		t.Fatalf("response content = %#v, want %#v", response.Content, modified)
 	}
 }

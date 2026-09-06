@@ -65,7 +65,7 @@ func TestRealRedisAnonymousHTTPLifecycleUsesGuardedNativeEvidence(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	login := lifecycleDispatch(t, dispatcher, frpplugin.OpLogin, frpplugin.LoginContent{Metas: proof})
+	login := lifecycleDispatch(t, dispatcher, frpplugin.OpLogin, frpplugin.LoginContent{Metas: proof, PrivilegeKey: allocation.CredentialToken})
 	if login.Reject {
 		t.Fatal("valid anonymous login was rejected")
 	}
@@ -126,7 +126,7 @@ func TestRealRedisAnonymousHTTPLifecycleUsesGuardedNativeEvidence(t *testing.T) 
 			t.Fatalf("idempotent stop status = %d", response.Code)
 		}
 	}
-	if !lifecycleDispatch(t, dispatcher, frpplugin.OpPing, frpplugin.PingContent{User: user}).Reject || !lifecycleDispatch(t, dispatcher, frpplugin.OpNewProxy, newProxy).Reject {
+	if !lifecycleDispatch(t, dispatcher, frpplugin.OpPing, frpplugin.PingContent{User: user, PrivilegeKey: allocation.CredentialToken}).Reject || !lifecycleDispatch(t, dispatcher, frpplugin.OpNewProxy, newProxy).Reject {
 		t.Fatal("stopped run retained frps authorization")
 	}
 	response = lifecycleRequest(t, api.Handler(), "/api/v1/anonymous/runs", allocationBody, "still-held", "")

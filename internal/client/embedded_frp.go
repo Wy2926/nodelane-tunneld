@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 
 	frpclient "github.com/fatedier/frp/client"
 	frpconfig "github.com/fatedier/frp/pkg/config"
@@ -20,6 +21,9 @@ import (
 // executable is extracted or launched on the user's machine.
 type EmbeddedFRPClient struct {
 	service *frpclient.Service
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	closed  bool
 }
 
 func NewEmbeddedFRPClient(configText string, logOutput io.Writer) (*EmbeddedFRPClient, error) {
@@ -74,16 +78,16 @@ func NewEmbeddedFRPClient(configText string, logOutput io.Writer) (*EmbeddedFRPC
 		ConfigSourceAggregator: aggregator,
 		UnsafeFeatures:         unsafeFeatures,
 	}
-	if !proxyURLConfigured {
-		// The standalone client was deliberately launched without lowercase
-		// http_proxy unless NT_FRP_PROXY_URL was set. Preserve that behavior
-		// without mutating the parent process environment.
-		options.ConnectorCreator = func(ctx context.Context, cfg *v1.ClientCommonConfig) frpclient.Connector {
-			cloned := *cfg
-			cloned.Transport = cfg.Transport
+	options.ConnectorCreator = func(ctx context.Context, cfg *v1.ClientCommonConfig) frpclient.Connector {
+		cloned := *cfg
+		cloned.Transport = cfg.Transport
+		if !proxyURLConfigured {
+			// The standalone client was deliberately launched without lowercase
+			// http_proxy unless NT_FRP_PROXY_URL was set. Preserve that behavior
+			// without mutating the parent process environment.
 			cloned.Transport.ProxyURL = ""
-			return frpclient.NewConnector(ctx, &cloned)
 		}
+		return &cancelableFRPConnector{Connector: frpclient.NewConnector(ctx, &cloned), ctx: ctx}
 	}
 	service, err := frpclient.NewService(options)
 	if err != nil {
@@ -109,5 +113,54 @@ func configureEmbeddedFRPLogger(output io.Writer, levelName string) {
 }
 
 func (client *EmbeddedFRPClient) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	client.mu.Lock()
+	client.cancel = cancel
+	if client.closed {
+		cancel()
+	}
+	client.mu.Unlock()
+	defer cancel()
 	return client.service.Run(ctx)
+}
+
+// Close also works before Run starts. Upstream Service.Close assumes its Run
+// context is already initialized, so cancellation is owned by this wrapper.
+// Upstream proxy negotiation may ignore cancellation until Open returns.
+func (client *EmbeddedFRPClient) Close() {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	client.closed = true
+	if client.cancel != nil {
+		client.cancel()
+	}
+}
+
+type cancelableFRPConnector struct {
+	frpclient.Connector
+	ctx       context.Context
+	mu        sync.Mutex
+	stopWatch func() bool
+}
+
+func (connector *cancelableFRPConnector) Open() error {
+	if err := connector.Connector.Open(); err != nil {
+		return err
+	}
+	// The upstream login exchange owns the connector until it becomes a
+	// controller. Close it on cancellation during that first-login window too.
+	connector.mu.Lock()
+	connector.stopWatch = context.AfterFunc(connector.ctx, func() { _ = connector.Close() })
+	connector.mu.Unlock()
+	return nil
+}
+
+func (connector *cancelableFRPConnector) Close() error {
+	connector.mu.Lock()
+	if connector.stopWatch != nil {
+		connector.stopWatch()
+		connector.stopWatch = nil
+	}
+	connector.mu.Unlock()
+	return connector.Connector.Close()
 }

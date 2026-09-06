@@ -10,6 +10,7 @@ import (
 	"github.com/Wy2926/nodelane-tunneld/internal/domain"
 	"github.com/Wy2926/nodelane-tunneld/internal/frpauth"
 	"github.com/Wy2926/nodelane-tunneld/internal/frpplugin"
+	frputil "github.com/fatedier/frp/pkg/util/util"
 )
 
 const (
@@ -60,6 +61,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		if err != nil {
 			return authorizationError(err)
 		}
+		modified.PrivilegeKey = frputil.GetAuthKey("", modified.Timestamp)
 		return frpplugin.Response{Unchange: false, Content: modified}, nil
 
 	case frpplugin.OpNewProxy:
@@ -82,7 +84,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		if err != nil {
 			return authorizationError(err)
 		}
-		return unchanged(), nil
+		content.PrivilegeKey = frputil.GetAuthKey("", content.Timestamp)
+		return frpplugin.Response{Unchange: false, Content: content}, nil
 
 	case frpplugin.OpNewWorkConn:
 		var content frpplugin.NewWorkConnContent
@@ -93,7 +96,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		if err != nil {
 			return authorizationError(err)
 		}
-		return unchanged(), nil
+		content.PrivilegeKey = frputil.GetAuthKey("", content.Timestamp)
+		return frpplugin.Response{Unchange: false, Content: content}, nil
 
 	case frpplugin.OpNewUserConn:
 		var content frpplugin.NewUserConnContent

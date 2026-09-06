@@ -4,6 +4,7 @@ package frpanonymous
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"github.com/Wy2926/nodelane-tunneld/internal/anonymous"
 	"github.com/Wy2926/nodelane-tunneld/internal/frpplugin"
 	configtypes "github.com/fatedier/frp/pkg/config/types"
+	frputil "github.com/fatedier/frp/pkg/util/util"
 )
 
 const (
@@ -63,6 +65,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		if request.DecodeContent(&content) != nil {
 			return rejected(InvalidRequestReason), nil
 		}
+		if !directProofMatches(content.PrivilegeKey, content.Metas) {
+			return rejected(InvalidCredentialReason), nil
+		}
 		run, response, err := d.authorizeLogin(ctx, content.Metas)
 		if response.Reject || err != nil {
 			return response, err
@@ -72,6 +77,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		}
 		content.RunID = run.RunID
 		content.ClientID = run.RunID
+		content.PrivilegeKey = frputil.GetAuthKey("", content.Timestamp)
 		// frps derives User.Metas for every later callback from Login.Metas, so
 		// these credentials must remain in its session state.
 		return frpplugin.Response{Unchange: false, Content: content}, nil
@@ -98,6 +104,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		if request.DecodeContent(&content) != nil {
 			return rejected(InvalidRequestReason), nil
 		}
+		if !directProofMatches(content.PrivilegeKey, content.User.Metas) {
+			return rejected(InvalidCredentialReason), nil
+		}
 		run, response, err := d.authorizeLogin(ctx, content.User.Metas)
 		if response.Reject || err != nil {
 			return response, err
@@ -105,12 +114,16 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		if !validUser(content.User, run) {
 			return rejected(InvalidCredentialReason), nil
 		}
-		return unchanged(), nil
+		content.PrivilegeKey = frputil.GetAuthKey("", content.Timestamp)
+		return frpplugin.Response{Unchange: false, Content: content}, nil
 
 	case frpplugin.OpNewWorkConn:
 		var content frpplugin.NewWorkConnContent
 		if request.DecodeContent(&content) != nil {
 			return rejected(InvalidRequestReason), nil
+		}
+		if !directProofMatches(content.PrivilegeKey, content.User.Metas) {
+			return rejected(InvalidCredentialReason), nil
 		}
 		run, response, err := d.authorizeLogin(ctx, content.User.Metas)
 		if response.Reject || err != nil {
@@ -119,7 +132,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		if !validUser(content.User, run) || content.RunID != run.RunID {
 			return rejected(InvalidCredentialReason), nil
 		}
-		return unchanged(), nil
+		content.PrivilegeKey = frputil.GetAuthKey("", content.Timestamp)
+		return frpplugin.Response{Unchange: false, Content: content}, nil
 
 	case frpplugin.OpNewUserConn:
 		var content frpplugin.NewUserConnContent
@@ -154,6 +168,13 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 	default:
 		return rejected(InvalidRequestReason), nil
 	}
+}
+
+// Independent work connections inherit metadata from frps, so each arrival
+// must also supply the matching run secret in its own native message.
+func directProofMatches(token string, metas map[string]string) bool {
+	_, expected, ok := runProof(metas)
+	return ok && token != "" && len(token) == len(expected) && subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
 }
 
 func (d *Dispatcher) authorizeLogin(ctx context.Context, metas map[string]string) (anonymous.Run, frpplugin.Response, error) {
