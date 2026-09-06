@@ -132,7 +132,7 @@ export default defineTranslation({
     unavailable: "غير متاح",
     notObserved: "لا توجد عينة بعد",
     partial: "بيانات جزئية",
-    never: "لم يبدأ بعد",
+    never: "لا يوجد تشغيل نشط",
     starting: "جارٍ الاتصال",
     online: "متصل",
     stopping: "جارٍ الإيقاف",

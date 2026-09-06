@@ -27,6 +27,9 @@ type fakeProvider struct {
 	exchangeErr      error
 	revokeErr        error
 	endSessionErr    error
+	issuerErr        error
+	issuerRequired   bool
+	responseIssuer   string
 	state            string
 	nonce            string
 	verifier         string
@@ -44,6 +47,17 @@ func (p *fakeProvider) AuthorizationURL(state, nonce, verifier, locale string) (
 		return "", p.authorizationErr
 	}
 	return "https://auth.example.test/authorize?state=" + url.QueryEscape(state), nil
+}
+
+func (p *fakeProvider) ValidateAuthorizationResponseIssuer(_ context.Context, issuer string) error {
+	p.responseIssuer = issuer
+	if p.issuerErr != nil {
+		return p.issuerErr
+	}
+	if (issuer == "" && p.issuerRequired) || (issuer != "" && issuer != "https://auth.example.test/oidc") {
+		return identity.ErrOIDCUnauthorized
+	}
+	return nil
 }
 
 func (p *fakeProvider) Exchange(_ context.Context, code, verifier, nonce string) (identity.OIDCTokens, error) {
@@ -318,6 +332,58 @@ func TestCallbackConsumesBindingCreatesSessionAndRedirectsLocally(t *testing.T) 
 	}
 }
 
+func TestCallbackAcceptsLogtoAuthorizationResponseIssuer(t *testing.T) {
+	f := newBrowserFixture(t)
+	f.provider.issuerRequired = true
+	login := f.request(http.MethodGet, "/auth/login", "", nil)
+	cookie := login.Result().Cookies()[0]
+	query := url.Values{
+		"code": {"authorization-code"}, "state": {f.sessions.login.State},
+		"iss": {"https://auth.example.test/oidc"},
+	}
+	response := f.request(http.MethodGet, "/auth/callback?"+query.Encode(), "", func(r *http.Request) {
+		r.AddCookie(cookie)
+	})
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/console/tunnels" ||
+		f.provider.exchangeCalls != 1 || f.sessions.createCalls != 1 || f.provider.responseIssuer != query.Get("iss") {
+		t.Fatalf("Logto-shaped callback failed: status=%d exchanges=%d sessions=%d", response.Code, f.provider.exchangeCalls, f.sessions.createCalls)
+	}
+}
+
+func TestCallbackRejectsInvalidIssuerBeforeConsumingLoginOrExchangingCode(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		issuers []string
+	}{
+		{name: "missing"},
+		{name: "empty", issuers: []string{""}},
+		{name: "duplicate", issuers: []string{"https://auth.example.test/oidc", "https://auth.example.test/oidc"}},
+		{name: "foreign", issuers: []string{"https://other.example.test/oidc"}},
+		{name: "non-exact", issuers: []string{"https://auth.example.test/oidc/"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newBrowserFixture(t)
+			f.provider.issuerRequired = true
+			login := f.request(http.MethodGet, "/auth/login", "", nil)
+			cookie := login.Result().Cookies()[0]
+			query := url.Values{"code": {"authorization-code"}, "state": {f.sessions.login.State}}
+			if test.issuers != nil {
+				query["iss"] = test.issuers
+			}
+			response := f.request(http.MethodGet, "/auth/callback?"+query.Encode(), "", func(r *http.Request) {
+				r.AddCookie(cookie)
+			})
+			requireBFFError(t, response, http.StatusUnauthorized, "unauthorized")
+			if f.sessions.consumeCalls != 0 || f.provider.exchangeCalls != 0 || f.accounts.calls != 0 || f.sessions.createCalls != 0 {
+				t.Fatal("invalid issuer consumed a login or reached authenticated dependencies")
+			}
+			if len(response.Result().Cookies()) != 0 {
+				t.Fatal("invalid issuer changed browser cookies")
+			}
+		})
+	}
+}
+
 func TestCallbackRevokesTokensAndFailsClosedOnInvalidIdentityOrAccountBinding(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -353,6 +419,8 @@ func TestCallbackMapsOnlyExplicitCredentialFailuresToUnauthorized(t *testing.T) 
 		status    int
 		code      string
 	}{
+		{name: "issuer rejected", configure: func(f *browserFixture) { f.provider.issuerErr = identity.ErrOIDCUnauthorized }, status: http.StatusUnauthorized, code: "unauthorized"},
+		{name: "issuer discovery unavailable", configure: func(f *browserFixture) { f.provider.issuerErr = identity.ErrOIDCUnavailable }, status: http.StatusServiceUnavailable, code: "dependency_unavailable"},
 		{name: "login missing", configure: func(f *browserFixture) { f.sessions.consumeErr = session.ErrNotFound }, status: http.StatusUnauthorized, code: "unauthorized"},
 		{name: "login expired", configure: func(f *browserFixture) { f.sessions.consumeErr = session.ErrExpired }, status: http.StatusUnauthorized, code: "unauthorized"},
 		{name: "login store unavailable", configure: func(f *browserFixture) { f.sessions.consumeErr = session.ErrUnavailable }, status: http.StatusServiceUnavailable, code: "dependency_unavailable"},
@@ -408,6 +476,7 @@ func TestCallbackRejectsMissingDuplicateOrWrongFlowBinding(t *testing.T) {
 		{name: "missing state", target: func(string) string { return "/auth/callback?code=code" }},
 		{name: "duplicate code", target: func(state string) string { return "/auth/callback?code=a&code=b&state=" + state }},
 		{name: "duplicate state", target: func(state string) string { return "/auth/callback?code=a&state=" + state + "&state=other" }},
+		{name: "unknown parameter", target: func(state string) string { return "/auth/callback?code=a&state=" + state + "&extra=value" }},
 		{name: "malformed query", target: func(string) string { return "/auth/callback?code=%ZZ&state=ignored" }},
 		{name: "oversized code", target: func(state string) string {
 			return "/auth/callback?code=" + strings.Repeat("a", 4097) + "&state=" + state

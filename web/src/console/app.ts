@@ -33,6 +33,8 @@ export function mountConsole(): void {
   let publicDomain = '';
   let stopPolling = () => {};
   let codeFeedback: 'copied' | 'manual' | '' = '';
+  let logoutPending = false;
+  let signedOutLocally = false;
 
   const showError = (error: unknown, sticky = false) => {
     operationError = sticky;
@@ -40,10 +42,18 @@ export function mountConsole(): void {
   };
   const handleError = (error: unknown, sticky = false) => {
     if (error instanceof APIError && (error.status === 401 || error.code === 'unauthorized')) {
-      clearCommand(); stopPolling(); window.location.assign(loginURL(window.location.href, locale)); return;
+      clearCommand(); stopPolling();
+      if (logoutPending) { showLocalLogout(); return; }
+      window.location.assign(loginURL(window.location.href, locale)); return;
     }
     showError(error, sticky);
   };
+  function showLocalLogout(): void {
+    signedOutLocally = true;
+    for (const id of ['list-view', 'detail-view', 'new-view', 'page-loading', 'page-retry', 'logout', 'new-route-link']) show(id, false);
+    set('account-name', copy.account);
+    alert.textContent = copy.loggedOut; alert.hidden = false;
+  }
   function clearCommand(): void {
     issued = null; commandNonce = ''; codeFeedback = ''; set('launch-command', ''); set('launch-feedback', '');
     element<HTMLTextAreaElement>('manual-command').value = ''; show('manual-command', false); show('command-display', false);
@@ -135,7 +145,7 @@ export function mountConsole(): void {
     catch (error) { if (signal.aborted || error instanceof APIError && error.status === 401) throw error; return null; }
   };
   const refresh = async (): Promise<void> => {
-    if (mutation || document.hidden) return;
+    if (mutation || document.hidden || signedOutLocally) return;
     try {
       await latest.run(async signal => {
         const active = await api.routes(false, signal);
@@ -241,7 +251,7 @@ export function mountConsole(): void {
     finally { mutation = false; element<HTMLButtonElement>('copy-launch').disabled = !!current && activeRun(current); set('copy-launch-label', copy.copy); }
   });
   element('logout').addEventListener('click', async () => {
-    if (mutation) return; mutation = true; latest.cancel(); clearCommand(); stopPolling();
+    if (mutation || signedOutLocally) return; mutation = true; logoutPending = true; latest.cancel(); clearCommand(); stopPolling();
     let localConfirmed = false;
     let resumeUpdates = false;
     try {
@@ -251,10 +261,11 @@ export function mountConsole(): void {
       if (localConfirmed && target) { window.location.assign(target); return; }
       throw new Error('logout_unconfirmed');
     } catch (error) {
-      if (localConfirmed) { show('list-view', false); show('detail-view', false); show('new-view', false); alert.textContent = copy.loggedOut; alert.hidden = false; }
+      if (localConfirmed) showLocalLogout();
       else {
         try {
           await api.session();
+          logoutPending = false;
           showError(error, true); resumeUpdates = true;
         } catch (sessionError) { show('page-retry', true); handleError(sessionError); }
       }
@@ -265,10 +276,12 @@ export function mountConsole(): void {
     }
   });
   async function boot(): Promise<void> {
+    if (signedOutLocally) return;
     stopPolling(); operationError = false; alert.hidden = true; show('page-retry', false); show('page-loading', true);
     if (page.view === 'invalid') { show('page-loading', false); alert.textContent = errors.route_not_found; alert.hidden = false; return; }
     try {
       const session = await api.session();
+      logoutPending = false;
       set('account-name', session.name || session.email || copy.account);
       const config = await api.config(); issuer = config.oidc.issuer; publicDomain = config.public_domain;
       mountIdentitySettings(document, config.oidc.issuer, locale, window.location.href);

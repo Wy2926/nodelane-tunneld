@@ -33,7 +33,8 @@ func defaultCommandDependencies(ui *consoleUI) commandDependencies {
 			}
 			return logoutWithStore(ctx, store, ui)
 		},
-		preflight: runclient.Preflight,
+		openBrowser: openDeviceBrowser,
+		preflight:   runclient.Preflight,
 		validateBootstrap: func(config runclient.BootstrapConfig) error {
 			if err := runclient.ValidateProxyURL(os.Getenv("NT_FRP_PROXY_URL")); err != nil {
 				return err

@@ -73,6 +73,12 @@ separate PostgreSQL/Redis access, seven distinct 32-byte secrets, separate Web
 and Native Logto application IDs, the Web secret, frps management credentials,
 and TLS certificates.
 
+Redis must be a standalone primary with no replicas and `maxmemory-policy
+noeviction`; the service account must allow `INFO` and `CONFIG GET`. A fresh
+prefix on an incompatible Redis deployment is not sufficient for anonymous
+resource initialization. The new Tunnel PostgreSQL database is initialized
+automatically on service startup; existing incompatible schemas are refused.
+
 Client options:
 
 | Variable | Purpose |

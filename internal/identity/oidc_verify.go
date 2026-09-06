@@ -61,8 +61,9 @@ func (c *OIDCClient) verifyClaims(ctx context.Context, raw, audience string, all
 	if raw == "" || len(raw) > oidcMaxResponseBytes {
 		return claims, ErrOIDCUnauthorized
 	}
-	jws, err := jose.ParseSignedCompact(raw, []jose.SignatureAlgorithm{jose.RS256})
-	if err != nil || len(jws.Signatures) != 1 || jws.Signatures[0].Protected.Algorithm != string(jose.RS256) {
+	// Logto 1.43.0 seeds P-384 keys; existing RSA tenants remain supported.
+	jws, err := jose.ParseSignedCompact(raw, []jose.SignatureAlgorithm{jose.RS256, jose.ES384})
+	if err != nil || len(jws.Signatures) != 1 {
 		return claims, ErrOIDCUnauthorized
 	}
 	if !oidcTokenTypeAllowed(jws.Signatures[0].Protected.ExtraHeaders[jose.HeaderType], allowedTokenTypes) {

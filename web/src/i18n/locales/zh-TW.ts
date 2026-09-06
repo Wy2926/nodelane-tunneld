@@ -132,7 +132,7 @@ export default defineTranslation({
     unavailable: "無法使用",
     notObserved: "尚無樣本",
     partial: "資料不完整",
-    never: "從未執行",
+    never: "目前未執行",
     starting: "正在連線",
     online: "線上",
     stopping: "正在停止",

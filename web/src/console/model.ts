@@ -69,6 +69,7 @@ export function safeLogoutURL(value: string, issuer: string): string | null {
 export function activeRun(route: Route): boolean { return !!route.current_run && route.current_run.status !== 'offline'; }
 export function runState(route: Route, now = Date.now()): string {
   const run = route.current_run;
+  // Completed runs are omitted; absence of a current run is not historical evidence.
   if (!run) return 'never';
   if (run.status === 'stopping' && run.stop_requested_at && now - Date.parse(run.stop_requested_at) > 15_000) return 'stop_timeout';
   return run.status;

@@ -37,6 +37,7 @@ var (
 
 type OIDCProvider interface {
 	AuthorizationURL(state, nonce, verifier, locale string) (string, error)
+	ValidateAuthorizationResponseIssuer(ctx context.Context, issuer string) error
 	Exchange(ctx context.Context, code, verifier, nonce string) (identity.OIDCTokens, error)
 	Revoke(ctx context.Context, refreshToken string) error
 	EndSessionURL(locale string) (string, error)
@@ -232,7 +233,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	code, state, ok := singleNonEmpty(query, "code", "state")
+	code, state, issuer, ok := authorizationResponse(query)
 	if !ok || !validAuthorizationCode(code) || !validRandomToken(state) {
 		s.writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
@@ -240,6 +241,10 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie(loginCookieName(state))
 	if err != nil || !validRandomToken(cookie.Value) {
 		s.writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if err := s.provider.ValidateAuthorizationResponseIssuer(r.Context(), issuer); err != nil {
+		s.writeDependencyError(w, err)
 		return
 	}
 	s.clearLoginCookie(w, state)
@@ -306,17 +311,24 @@ func parseBoundedQuery(raw string, limit int) (url.Values, error) {
 	return url.ParseQuery(raw)
 }
 
-func singleNonEmpty(query url.Values, first, second string) (string, string, bool) {
+func authorizationResponse(query url.Values) (string, string, string, bool) {
 	for key := range query {
-		if key != first && key != second {
-			return "", "", false
+		if key != "code" && key != "state" && key != "iss" {
+			return "", "", "", false
 		}
 	}
-	firstValues, secondValues := query[first], query[second]
-	if len(firstValues) != 1 || len(secondValues) != 1 || firstValues[0] == "" || secondValues[0] == "" {
-		return "", "", false
+	codes, states := query["code"], query["state"]
+	if len(codes) != 1 || len(states) != 1 || codes[0] == "" || states[0] == "" {
+		return "", "", "", false
 	}
-	return firstValues[0], secondValues[0], true
+	issuer := ""
+	if values, exists := query["iss"]; exists {
+		if len(values) != 1 || values[0] == "" {
+			return "", "", "", false
+		}
+		issuer = values[0]
+	}
+	return codes[0], states[0], issuer, true
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {

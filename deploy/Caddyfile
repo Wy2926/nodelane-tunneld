@@ -43,5 +43,5 @@ http://*.tunnel.nodelane.net {
     reverse_proxy 127.0.0.1:8080
 }
 
-# To enable HTTPS tunnels later, remove the http:// prefix above, configure a
-# wildcard certificate (normally through DNS-01), and set PUBLIC_SCHEME=https.
+# This release supports HTTP tunnel routes only. Keep the wildcard entry on HTTP;
+# the control site and OIDC callbacks must remain on HTTPS.

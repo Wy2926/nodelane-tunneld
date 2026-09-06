@@ -132,7 +132,7 @@ export default defineTranslation({
     unavailable: "Indisponible",
     notObserved: "Aucun échantillon",
     partial: "Données partielles",
-    never: "Jamais démarré",
+    never: "Aucune exécution active",
     starting: "Connexion",
     online: "En ligne",
     stopping: "Arrêt en cours",

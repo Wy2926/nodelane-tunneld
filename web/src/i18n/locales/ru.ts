@@ -132,7 +132,7 @@ export default defineTranslation({
     unavailable: "Недоступно",
     notObserved: "Пока нет данных",
     partial: "Неполные данные",
-    never: "Не запускался",
+    never: "Нет активного запуска",
     starting: "Подключение",
     online: "В сети",
     stopping: "Остановка",

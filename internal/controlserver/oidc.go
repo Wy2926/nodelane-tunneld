@@ -61,6 +61,14 @@ func (p *lazyOIDCProvider) AuthorizationURL(state, nonce, verifier, locale strin
 	return client.AuthorizationURL(state, nonce, verifier, locale)
 }
 
+func (p *lazyOIDCProvider) ValidateAuthorizationResponseIssuer(ctx context.Context, issuer string) error {
+	client, err := p.get(ctx)
+	if err != nil {
+		return err
+	}
+	return client.ValidateAuthorizationResponseIssuer(ctx, issuer)
+}
+
 func (p *lazyOIDCProvider) Exchange(ctx context.Context, code, verifier, nonce string) (identity.OIDCTokens, error) {
 	client, err := p.get(ctx)
 	if err != nil {

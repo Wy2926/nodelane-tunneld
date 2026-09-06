@@ -132,7 +132,7 @@ export default defineTranslation({
     unavailable: "उपलब्ध नहीं",
     notObserved: "अभी कोई नमूना नहीं",
     partial: "आंशिक डेटा",
-    never: "कभी शुरू नहीं हुई",
+    never: "कोई सक्रिय रन नहीं",
     starting: "कनेक्ट हो रहा है",
     online: "ऑनलाइन",
     stopping: "रुक रहा है",

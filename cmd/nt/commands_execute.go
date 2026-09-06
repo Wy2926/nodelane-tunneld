@@ -32,6 +32,7 @@ type commandDependencies struct {
 	api               func() (commandAPI, error)
 	account           func(context.Context, runclient.OIDCConfig) (accountSession, error)
 	logout            func(context.Context) error
+	openBrowser       func(context.Context, string) error
 	preflight         func(context.Context, runclient.Target) error
 	validateBootstrap func(runclient.BootstrapConfig) error
 	installationID    func() (string, error)
@@ -84,7 +85,19 @@ func executeCommand(ctx context.Context, command cliCommand, ui *consoleUI, deps
 			err = account.Login(ctx, func(device cliauth.DeviceCode) error {
 				ui.detail(ui.text(msgLoginURL), safeConsoleField(device.VerificationURI, 4096))
 				ui.highlightedDetail(ui.text(msgLoginCode), safeConsoleField(device.UserCode, 64))
-				return nil
+				if !device.Expiry.IsZero() {
+					ui.detail(ui.text(msgExpiresAtLabel), device.Expiry.Local().Format("2006-01-02 15:04:05 MST"))
+				}
+				if deps.openBrowser != nil && ctx.Err() == nil {
+					target := device.VerificationURIComplete
+					if target == "" {
+						target = device.VerificationURI
+					}
+					openCtx, cancel := context.WithTimeout(ctx, deviceBrowserTimeout)
+					_ = deps.openBrowser(openCtx, target)
+					cancel()
+				}
+				return ctx.Err()
 			})
 			if err != nil {
 				return err

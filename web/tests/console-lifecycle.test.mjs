@@ -129,7 +129,7 @@ test('ambiguous logout rechecks the session and resumes live updates when still 
   assert.doesNotMatch(document.getElementById('page-alert').textContent, /Signed out locally/);
 });
 
-test('ambiguous logout follows signed-out handling when the session recheck returns 401', async t => {
+test('ambiguous logout does not restart login when the session recheck returns 401', async t => {
   let logoutAttempted = false;
   const window = await fixture(t, '', path => {
     if (path === '/auth/logout') { logoutAttempted = true; throw new Error('response lost after logout'); }
@@ -137,7 +137,34 @@ test('ambiguous logout follows signed-out handling when the session recheck retu
   });
   window.document.getElementById('logout').click(); await settle();
   const confirmedSignedOut = window.document.getElementById('list-view').hidden && /Signed out locally/.test(window.document.getElementById('page-alert').textContent);
-  assert.equal(window.location.pathname === '/auth/login' || confirmedSignedOut, true, 'a confirmed expired session must not leave the signed-in console active');
+  assert.equal(confirmedSignedOut, true, 'a confirmed expired session must not leave the signed-in console active');
+  assert.equal(window.location.pathname, '/console/tunnels', 'sign-out must not reenter an active provider SSO session');
+});
+
+test('failed refresh revocation keeps the confirmed local sign-out visible and stops polling', async t => {
+  let logoutAttempted = false;
+  let routeRequests = 0;
+  const window = await fixture(t, '', path => {
+    if (path === '/auth/logout') {
+      logoutAttempted = true;
+      return Response.json({ error: { code: 'dependency_unavailable' } }, { status: 503 });
+    }
+    if (path === '/api/v1/session' && logoutAttempted) return Response.json({ authenticated: false });
+    if (path === '/api/v1/routes') routeRequests++;
+  });
+  const document = window.document;
+  document.getElementById('logout').click(); await settle();
+  assert.equal(window.location.pathname, '/console/tunnels', 'revocation failure must not trigger automatic login');
+  for (const id of ['list-view', 'detail-view', 'new-view', 'page-retry', 'page-loading', 'logout']) {
+    assert.equal(document.getElementById(id).hidden, true, `${id} must not remain active after local sign-out`);
+  }
+  assert.match(document.getElementById('page-alert').textContent, /Signed out locally/);
+  assert.match(document.getElementById('page-alert').textContent, /not confirmed/);
+  assert.equal(document.getElementById('page-alert').hidden, false);
+  const requestsAtLogout = routeRequests;
+  t.mock.timers.tick(15000); await settle();
+  assert.equal(routeRequests, requestsAtLogout, 'local sign-out must not resume authenticated polling');
+  assert.equal(window.location.pathname, '/console/tunnels');
 });
 
 test('unavailable logout session check offers retry and successful retry restores polling', async t => {
@@ -160,4 +187,26 @@ test('unavailable logout session check offers retry and successful retry restore
   connections = 9;
   t.mock.timers.tick(5000); await settle();
   assert.equal(document.querySelector('#route-rows tr').cells[2].textContent, '9');
+});
+
+test('logout session retry that confirms sign-out never navigates to login', async t => {
+  let logoutAttempted = false;
+  let sessionAvailable = false;
+  const window = await fixture(t, '', path => {
+    if (path === '/auth/logout') { logoutAttempted = true; throw new Error('response lost'); }
+    if (path === '/api/v1/session' && logoutAttempted) {
+      return sessionAvailable
+        ? Response.json({ authenticated: false })
+        : Response.json({ error: { code: 'dependency_unavailable' } }, { status: 503 });
+    }
+  });
+  const document = window.document;
+  document.getElementById('logout').click(); await settle();
+  assert.equal(document.getElementById('page-retry').hidden, false);
+  sessionAvailable = true;
+  document.getElementById('page-retry').click(); await settle();
+  assert.equal(window.location.pathname, '/console/tunnels');
+  assert.equal(document.getElementById('list-view').hidden, true);
+  assert.equal(document.getElementById('page-retry').hidden, true);
+  assert.match(document.getElementById('page-alert').textContent, /Signed out locally/);
 });

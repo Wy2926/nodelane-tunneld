@@ -132,7 +132,7 @@ export default defineTranslation({
     unavailable: "Nicht verfügbar",
     notObserved: "Noch keine Messwerte",
     partial: "Unvollständige Daten",
-    never: "Nie gestartet",
+    never: "Kein aktiver Lauf",
     starting: "Verbindung wird aufgebaut",
     online: "Online",
     stopping: "Wird gestoppt",

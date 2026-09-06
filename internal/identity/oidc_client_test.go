@@ -183,6 +183,7 @@ func TestOIDCClientAuthorizationAndLogoutURLs(t *testing.T) {
 	want := url.Values{
 		"client_id": {"web-app"}, "redirect_uri": {"https://tunnel.example/auth/callback"}, "response_type": {"code"},
 		"scope": {"openid profile email offline_access"}, "state": {"state-123"}, "nonce": {"nonce-123"},
+		"prompt":                {"consent"},
 		"code_challenge_method": {"S256"}, "code_challenge": {"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"}, "ui_locales": {"zh-CN"},
 	}
 	if u.Scheme+"://"+u.Host+u.Path != f.server.URL+"/login" || !reflect.DeepEqual(u.Query(), want) {
@@ -204,6 +205,30 @@ func TestOIDCClientAuthorizationAndLogoutURLs(t *testing.T) {
 	u, _ = url.Parse(raw)
 	if u.Query().Has("ui_locales") || u.Query().Has("id_token_hint") {
 		t.Fatal("optional locale or token hint appeared in logout URL")
+	}
+}
+
+func TestOIDCWebAuthorizationRequestsConsentForOfflineAccess(t *testing.T) {
+	c := newOIDCTestProvider(t).client()
+	for _, locale := range []string{"", "zh-CN"} {
+		raw, err := c.AuthorizationURL("state-123", "nonce-123", oidcTestVerifier, locale)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parameters := u.Query()
+		if !strings.Contains(" "+parameters.Get("scope")+" ", " offline_access ") {
+			t.Fatal("Web authorization omitted the offline-access scope required by server sessions")
+		}
+		if !reflect.DeepEqual(parameters["prompt"], []string{"consent"}) {
+			t.Fatal("Web offline access requires exactly prompt=consent without forcing login")
+		}
+		if parameters.Has("max_age") {
+			t.Fatal("Web authorization must preserve SSO without forcing a fresh authentication age")
+		}
 	}
 }
 
@@ -296,7 +321,7 @@ func TestOIDCClientRejectsMissingOrUnsupportedProviderCapabilities(t *testing.T)
 	}{
 		{"missing S256 declaration", "code_challenge_methods_supported", nil},
 		{"plain PKCE only", "code_challenge_methods_supported", []string{"plain"}},
-		{"missing RS256 declaration", "id_token_signing_alg_values_supported", nil},
+		{"missing signing algorithm declaration", "id_token_signing_alg_values_supported", nil},
 		{"ES256 signing only", "id_token_signing_alg_values_supported", []string{"ES256"}},
 		{"missing grant declaration", "grant_types_supported", nil},
 		{"authorization code grant only", "grant_types_supported", []string{"authorization_code"}},
@@ -326,6 +351,81 @@ func TestOIDCClientRejectsMissingOrUnsupportedProviderCapabilities(t *testing.T)
 			f.mu.Unlock()
 			if !errors.Is(err, ErrOIDCConfiguration) {
 				t.Fatalf("got %v, want configuration error", err)
+			}
+		})
+	}
+}
+
+func TestOIDCAuthorizationResponseIssuerMatchesDiscovery(t *testing.T) {
+	for _, declaration := range []struct {
+		name     string
+		value    any
+		required bool
+	}{
+		{name: "Logto support", value: true, required: true},
+		{name: "explicitly unsupported", value: false},
+		{name: "omitted"},
+	} {
+		t.Run(declaration.name, func(t *testing.T) {
+			f := newOIDCTestProvider(t)
+			if declaration.value != nil {
+				f.metadata["authorization_response_iss_parameter_supported"] = declaration.value
+			}
+			client := f.client()
+			for _, test := range []struct {
+				name    string
+				issuer  string
+				allowed bool
+			}{
+				{name: "exact", issuer: f.issuer(), allowed: true},
+				{name: "missing", allowed: !declaration.required},
+				{name: "foreign", issuer: "https://other.example.test/oidc"},
+				{name: "trailing slash", issuer: f.issuer() + "/"},
+				{name: "whitespace", issuer: " " + f.issuer()},
+				{name: "different scheme", issuer: strings.Replace(f.issuer(), "https:", "http:", 1)},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					err := client.ValidateAuthorizationResponseIssuer(context.Background(), test.issuer)
+					if (test.allowed && err != nil) || (!test.allowed && !errors.Is(err, ErrOIDCUnauthorized)) {
+						t.Fatalf("issuer validation returned %v, allowed=%t", err, test.allowed)
+					}
+				})
+			}
+			if len(f.requestLog("/exchange")) != 0 {
+				t.Fatal("issuer validation contacted the token endpoint")
+			}
+		})
+	}
+}
+
+func TestOIDCClientRejectsMalformedAuthorizationIssuerCapability(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value any
+	}{
+		{name: "null"},
+		{name: "string", value: "true"},
+		{name: "number", value: 1},
+		{name: "array", value: []bool{true}},
+		{name: "object", value: map[string]bool{"supported": true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newOIDCTestProvider(t)
+			f.metadata["authorization_response_iss_parameter_supported"] = test.value
+			if _, err := NewOIDCClient(context.Background(), f.options()); !errors.Is(err, ErrOIDCConfiguration) {
+				t.Fatalf("malformed issuer capability accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestOIDCClientAcceptsPinnedLogtoSigningAlgorithms(t *testing.T) {
+	for _, algorithms := range [][]string{{"RS256"}, {"ES384"}, {"RS256", "ES384"}} {
+		t.Run(strings.Join(algorithms, "+"), func(t *testing.T) {
+			f := newOIDCTestProvider(t)
+			f.metadata["id_token_signing_alg_values_supported"] = algorithms
+			if _, err := NewOIDCClient(context.Background(), f.options()); err != nil {
+				t.Fatalf("supported Logto signing algorithms rejected: %v", err)
 			}
 		})
 	}

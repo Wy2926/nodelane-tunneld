@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -27,7 +28,13 @@ func TestConsoleBrowserFixture(t *testing.T) {
 	f := isolatedFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	runtime, err := Open(ctx, f.cfg)
+	// Synthetic browser sessions must never contact the production identity service.
+	issuer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer issuer.Close()
+	f.cfg.OIDCIssuer = issuer.URL + "/oidc"
+	runtime, err := openWithHTTPClient(ctx, f.cfg, issuer.Client())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -54,6 +54,20 @@ test('statistics never convert missing or unavailable samples into zero', () => 
   assert.equal(runState({ ...route, current_run: { status: 'stopping', stop_requested_at: '2026-09-06T00:00:00Z' } }, Date.parse('2026-09-06T00:00:16Z')), 'stop_timeout');
 });
 
+test('a route without a current run is not presented as having never run', async () => {
+  const window = new Window();
+  const copy = getTranslation('en').console;
+  const row = routeRow(window.document, route, {
+    route_id: id, availability: 'available', current_connections: 0,
+    upload_bytes_today: 182, download_bytes_today: 319, proxy_state: 'offline',
+  }, copy, 'en', false);
+  assert.equal(copy[runState(route)], 'No active run');
+  assert.match(row.textContent, /No active run/);
+  assert.doesNotMatch(row.textContent, /Never started/);
+  assert.equal(getTranslation('zh-CN').console[runState(route)], '\u65e0\u6d3b\u52a8\u8fd0\u884c');
+  await window.happyDOM.abort();
+});
+
 test('API writes are same-origin CSRF protected and preserve an explicit idempotency key', async () => {
   const calls = [];
   const api = new ConsoleAPI(async (path, options) => { calls.push([path, options]); return Response.json(path === '/api/v1/session' ? { authenticated: true, csrf_token: 'csrf-only', name: 'Person' } : { route, replayed: false }); });

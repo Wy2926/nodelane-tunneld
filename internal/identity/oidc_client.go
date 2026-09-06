@@ -25,16 +25,17 @@ type OIDCOptions struct {
 }
 
 type OIDCClient struct {
-	issuer        string
-	publicOrigin  string
-	apiResource   string
-	nativeID      string
-	revocationURL string
-	endSessionURL string
-	http          *http.Client
-	oauth         oauth2.Config
-	keys          *oidc.RemoteKeySet
-	now           func() time.Time
+	issuer                 string
+	publicOrigin           string
+	apiResource            string
+	nativeID               string
+	revocationURL          string
+	endSessionURL          string
+	responseIssuerRequired bool
+	http                   *http.Client
+	oauth                  oauth2.Config
+	keys                   *oidc.RemoteKeySet
+	now                    func() time.Time
 }
 
 func NewOIDCClient(ctx context.Context, opts OIDCOptions) (*OIDCClient, error) {
@@ -67,18 +68,29 @@ func NewOIDCClient(ctx context.Context, opts OIDCOptions) (*OIDCClient, error) {
 	if provider.Claims(&metadata) != nil {
 		return nil, ErrOIDCConfiguration
 	}
+	var responseIssuerRequired bool
+	if raw, exists := metadata["authorization_response_iss_parameter_supported"]; exists {
+		var supported *bool
+		if json.Unmarshal(raw, &supported) != nil || supported == nil {
+			return nil, ErrOIDCConfiguration
+		}
+		responseIssuerRequired = *supported
+	}
 	for _, capability := range []struct {
 		field    string
 		required []string
 	}{
 		{"code_challenge_methods_supported", []string{"S256"}},
-		{"id_token_signing_alg_values_supported", []string{"RS256"}},
 		{"grant_types_supported", []string{"authorization_code", "refresh_token"}},
 		{"token_endpoint_auth_methods_supported", []string{"client_secret_basic"}},
 	} {
 		if !oidcMetadataSupports(metadata, capability.field, capability.required...) {
 			return nil, ErrOIDCConfiguration
 		}
+	}
+	if !oidcMetadataSupports(metadata, "id_token_signing_alg_values_supported", "RS256") &&
+		!oidcMetadataSupports(metadata, "id_token_signing_alg_values_supported", "ES384") {
+		return nil, ErrOIDCConfiguration
 	}
 	endpoints := make(map[string]string)
 	for name, raw := range metadata {
@@ -110,7 +122,8 @@ func NewOIDCClient(ctx context.Context, opts OIDCOptions) (*OIDCClient, error) {
 	return &OIDCClient{
 		issuer: opts.Issuer, publicOrigin: publicOrigin, apiResource: opts.APIResource, nativeID: opts.NativeClientID,
 		revocationURL: endpoints["revocation_endpoint"], endSessionURL: endpoints["end_session_endpoint"],
-		http: client, now: now, keys: oidc.NewRemoteKeySet(httpCtx, endpoints["jwks_uri"]),
+		responseIssuerRequired: responseIssuerRequired,
+		http:                   client, now: now, keys: oidc.NewRemoteKeySet(httpCtx, endpoints["jwks_uri"]),
 		oauth: oauth2.Config{
 			ClientID: opts.WebClientID, ClientSecret: opts.WebClientSecret, Endpoint: endpoint,
 			RedirectURL: publicOrigin + "/auth/callback", Scopes: []string{"openid", "profile", "email", "offline_access"},
@@ -147,11 +160,20 @@ func (c *OIDCClient) AuthorizationURL(state, nonce, verifier, locale string) (st
 	if strings.TrimSpace(state) == "" || strings.TrimSpace(nonce) == "" || !validOIDCVerifier(verifier) {
 		return "", ErrOIDCUnauthorized
 	}
-	options := []oauth2.AuthCodeOption{oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier)}
+	// Offline access requires consent; omitting login preserves the provider's SSO session.
+	options := []oauth2.AuthCodeOption{oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier), oauth2.SetAuthURLParam("prompt", "consent")}
 	if locale != "" {
 		options = append(options, oauth2.SetAuthURLParam("ui_locales", locale))
 	}
 	return c.oauth.AuthCodeURL(state, options...), nil
+}
+
+// RFC 9207 requires an exact issuer match before exchanging an authorization code.
+func (c *OIDCClient) ValidateAuthorizationResponseIssuer(_ context.Context, issuer string) error {
+	if (issuer == "" && c.responseIssuerRequired) || (issuer != "" && issuer != c.issuer) {
+		return ErrOIDCUnauthorized
+	}
+	return nil
 }
 
 func (c *OIDCClient) Exchange(ctx context.Context, code, verifier, nonce string) (OIDCTokens, error) {
