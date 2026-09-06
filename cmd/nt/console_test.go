@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/term"
@@ -164,48 +163,5 @@ func TestConsoleForcedColorUsesStyledOutput(t *testing.T) {
 	ui.success("connected")
 	if !strings.Contains(stdout.String(), "\x1b[") {
 		t.Fatalf("forced-color output is unstyled: %q", stdout.String())
-	}
-}
-
-func TestConsoleRequestIncludesHTTPStatus(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-	var stdout bytes.Buffer
-	ui := newConsoleUI(&stdout, &bytes.Buffer{})
-	ui.request(time.Date(2026, time.September, 5, 12, 0, 0, 0, time.Local), "203.0.113.9", "GET", 404, "demo.example/missing")
-	for _, value := range []string{"203.0.113.9", "GET", "404", "demo.example/missing"} {
-		if !strings.Contains(stdout.String(), value) {
-			t.Fatalf("request output %q does not contain %q", stdout.String(), value)
-		}
-	}
-}
-
-func TestConsoleRedirectedStatsUseStableLines(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-	var stdout bytes.Buffer
-	ui := newConsoleUI(&stdout, &bytes.Buffer{})
-	ui.stats("tcp", trafficSnapshot{ActiveConnections: 1, TotalConnections: 2})
-	ui.stats("tcp", trafficSnapshot{ActiveConnections: 2, TotalConnections: 3})
-	ui.endStats()
-	if strings.Contains(stdout.String(), "\r") {
-		t.Fatalf("redirected stats contain cursor rewrites: %q", stdout.String())
-	}
-	if got := strings.Count(stdout.String(), "TCP"); got != 2 {
-		t.Fatalf("stats lines = %d, want 2; output: %q", got, stdout.String())
-	}
-}
-
-func TestWarningGateSuppressesDuplicatesUntilReset(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-	var stdout bytes.Buffer
-	ui := newConsoleUI(&stdout, &bytes.Buffer{})
-	ui.warningOnce("http-upstream", "offline")
-	ui.warningOnce("http-upstream", "offline again")
-	if got := strings.Count(stdout.String(), "WARN"); got != 1 {
-		t.Fatalf("warning count = %d, want 1; output: %q", got, stdout.String())
-	}
-	ui.resetWarning("http-upstream")
-	ui.warningOnce("http-upstream", "offline later")
-	if got := strings.Count(stdout.String(), "WARN"); got != 2 {
-		t.Fatalf("warning count after reset = %d, want 2; output: %q", got, stdout.String())
 	}
 }

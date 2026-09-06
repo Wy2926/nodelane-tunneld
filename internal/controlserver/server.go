@@ -40,6 +40,7 @@ type Server struct {
 	closeError        error
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
+	reconcileRuns     []func(context.Context) error
 }
 
 func Open(ctx context.Context, cfg Config) (*Server, error) { return openWithHTTPClient(ctx, cfg, nil) }
@@ -110,6 +111,12 @@ func openWithHTTPClient(ctx context.Context, cfg Config, httpClient *http.Client
 	if err != nil {
 		return nil, err
 	}
+	registeredRecovery := &registeredReconciler{store: runtime.postgres, observer: evidence}
+	anonymousRecovery := &anonymousReconciler{store: anonymousStore, observer: evidence}
+	runtime.reconcileRuns = []func(context.Context) error{
+		func(ctx context.Context) error { return registeredRecovery.reconcile(ctx, 100) },
+		func(ctx context.Context) error { return anonymousRecovery.reconcile(ctx, 100) },
+	}
 	authenticator, err := bff.NewAPIAuthenticator(sessions, runtime.postgres, provider)
 	if err != nil {
 		return nil, err
@@ -150,9 +157,10 @@ func openWithHTTPClient(ctx context.Context, cfg Config, httpClient *http.Client
 	}
 	runtime.plugin = privatePlugin(plugin)
 	runtime.public = newPublicRouter(ClientConfig{
-		FRP:  FRPClientConfig{ServerAddr: cfg.FRPServerAddr, ServerPort: cfg.FRPServerPort, TLSServerName: cfg.FRPTLSServerName, TrustedCAPEM: publicCA},
-		OIDC: OIDCClientConfig{Issuer: cfg.OIDCIssuer, ClientID: cfg.OIDCNativeClientID, Resource: cfg.OIDCResource},
-	}, auth.Handler(), control.Handler(), anonymousHTTP.Handler(), server.PublicHandler(cfg.ReleaseDir))
+		PublicDomain: cfg.PublicDomain,
+		FRP:          FRPClientConfig{ServerAddr: cfg.FRPServerAddr, ServerPort: cfg.FRPServerPort, TLSServerName: cfg.FRPTLSServerName, TrustedCAPEM: publicCA},
+		OIDC:         OIDCClientConfig{Issuer: cfg.OIDCIssuer, ClientID: cfg.OIDCNativeClientID, Resource: cfg.OIDCResource},
+	}, auth.Handler(), control.Handler(), anonymousHTTP.Handler(), consoleOrPublic(newConsoleHandler(authenticator, server.ReadConsoleShell), server.PublicHandler(cfg.ReleaseDir)))
 	runtime.startMaintenance(ctx)
 	return runtime, nil
 }

@@ -66,7 +66,7 @@ func TestRealPersistentServiceMountsNewAPIRefreshesSessionAndObservesNativeConne
 			return
 		}
 		if r.URL.Path == "/api/v2/clients" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": map[string]any{"total": 1, "page": 1, "pageSize": 2, "items": []any{map[string]any{"key": observedRun, "user": "", "clientID": observedRun, "runID": observedRun, "online": true, "clientIP": "198.51.100.77"}}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": map[string]any{"total": 1, "page": 1, "pageSize": 2, "items": []any{map[string]any{"key": observedRun, "user": "", "clientID": observedRun, "runID": "fcs_aaaaaaaaaaaaaaaaaaaaaaaaaa", "online": true, "clientIP": "198.51.100.77", "firstConnectedAt": 1, "lastConnectedAt": 1}}}})
 			return
 		}
 		if r.URL.Path == "/api/v2/proxies/"+observedProxy {

@@ -259,6 +259,9 @@ func TestControlIntegrationNameTransferRejectsStaleAuthorization(t *testing.T) {
 	if !f.clock.Now().Equal(*deleted.RecoverableUntil) {
 		t.Fatal("recovery cutoff differs from exactly seven days")
 	}
+	if released, err := f.store.ReleaseNeverGranted(f.ctx, original.Run.ID); err != nil || released.Status != domain.RunOffline {
+		t.Fatalf("expired never-granted run was not drained: %+v %v", released, err)
+	}
 	other, err := f.store.ResolveAccount(f.ctx, "https://join.issuer.test", "other-owner")
 	if err != nil {
 		t.Fatal(err)

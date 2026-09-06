@@ -10,16 +10,23 @@ import (
 	"time"
 )
 
-func TestNewEmbeddedFRPClientAcceptsGeneratedConfig(t *testing.T) {
-	config := (FRPConfig{
-		ClientID: "cli_test",
-		Tunnel: Tunnel{
-			ID: "tun_test", Protocol: "http", ProxyName: "tun_test", Subdomain: "calm-panda-test",
-			TunnelToken: "short-lived-token", BandwidthLimit: "5MB", ExpiresAt: time.Now().Add(time.Hour),
-			FRP: FRPConnection{ServerAddr: "tunnel.nodelane.net", ServerPort: 7000, AuthToken: "frp-token"},
-		},
-		LocalPort: 3000,
-	}).TOML()
+func TestNewEmbeddedFRPClientAcceptsStockConfig(t *testing.T) {
+	const config = `serverAddr = "tunnel.test"
+serverPort = 7000
+clientID = "run_test"
+auth.method = "token"
+auth.token = "run-test-secret"
+transport.protocol = "tcp"
+transport.tls.enable = true
+transport.tls.disableCustomTLSFirstByte = true
+
+[[proxies]]
+name = "route_test"
+type = "http"
+localIP = "127.0.0.1"
+localPort = 3000
+subdomain = "test"
+`
 	client, err := NewEmbeddedFRPClient(config, io.Discard)
 	if err != nil {
 		t.Fatal(err)

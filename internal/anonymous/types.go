@@ -130,16 +130,17 @@ type Allocation struct {
 }
 
 type Run struct {
-	RunID             string       `json:"run_id"`
-	ProxyName         string       `json:"proxy_name"`
-	PublicEndpoint    string       `json:"public_endpoint"`
-	Protocol          Protocol     `json:"protocol"`
-	State             State        `json:"state"`
-	DesiredState      DesiredState `json:"desired_state"`
-	CreatedAt         time.Time    `json:"created_at"`
-	ConnectDeadlineAt time.Time    `json:"connect_deadline_at"`
-	LeaseExpiresAt    time.Time    `json:"lease_expires_at,omitempty"`
-	HardExpiresAt     time.Time    `json:"hard_expires_at"`
+	RunID                    string       `json:"run_id"`
+	ProxyName                string       `json:"proxy_name"`
+	PublicEndpoint           string       `json:"public_endpoint"`
+	Protocol                 Protocol     `json:"protocol"`
+	State                    State        `json:"state"`
+	DesiredState             DesiredState `json:"desired_state"`
+	CreatedAt                time.Time    `json:"created_at"`
+	ConnectDeadlineAt        time.Time    `json:"connect_deadline_at"`
+	LeaseExpiresAt           time.Time    `json:"lease_expires_at,omitempty"`
+	HardExpiresAt            time.Time    `json:"hard_expires_at"`
+	ProxyRegistrationGranted bool         `json:"-"`
 }
 
 type HeartbeatResult struct {
@@ -150,28 +151,32 @@ type HeartbeatResult struct {
 }
 
 type VerificationItem struct {
-	RunID          string    `json:"run_id"`
-	ProxyName      string    `json:"proxy_name"`
-	PublicEndpoint string    `json:"public_endpoint"`
-	Protocol       Protocol  `json:"protocol"`
-	DueAt          time.Time `json:"due_at"`
+	RunID                    string    `json:"run_id"`
+	ProxyName                string    `json:"proxy_name"`
+	PublicEndpoint           string    `json:"public_endpoint"`
+	Protocol                 Protocol  `json:"protocol"`
+	DueAt                    time.Time `json:"due_at"`
+	ProxyRegistrationGranted bool      `json:"-"`
 }
 
 type ReleaseEvidenceKind string
 
 const (
-	ReleaseEvidenceOfflineSample   ReleaseEvidenceKind = "offline_sample"
-	ReleaseEvidenceNeverRegistered ReleaseEvidenceKind = "never_registered"
+	ReleaseEvidenceOfflineSample      ReleaseEvidenceKind = "offline_sample"
+	ReleaseEvidenceNeverRegistered    ReleaseEvidenceKind = "never_registered"
+	ReleaseEvidenceDrainedAbsentProxy ReleaseEvidenceKind = "drained_absent_proxy"
 )
 
 type ReleaseEvidence struct {
-	Kind                     ReleaseEvidenceKind `json:"kind"`
-	RunID                    string              `json:"run_id"`
-	ProxyName                string              `json:"proxy_name"`
-	ObservedOffline          bool                `json:"observed_offline"`
-	SampleAvailable          bool                `json:"sample_available"`
-	CurrentConnections       int64               `json:"current_connections"`
-	ConfirmedNeverRegistered bool                `json:"confirmed_never_registered"`
+	Kind                        ReleaseEvidenceKind `json:"kind"`
+	RunID                       string              `json:"run_id"`
+	ProxyName                   string              `json:"proxy_name"`
+	ObservedOffline             bool                `json:"observed_offline"`
+	ProxyNotObserved            bool                `json:"proxy_not_observed"`
+	SampleAvailable             bool                `json:"sample_available"`
+	CurrentConnections          int64               `json:"current_connections"`
+	ConfirmedNeverRegistered    bool                `json:"confirmed_never_registered"`
+	ConfirmedClientDisconnected bool                `json:"confirmed_client_disconnected"`
 }
 
 type VerificationCorruptionError struct {

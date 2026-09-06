@@ -7,12 +7,18 @@
     "dev": "astro dev",
     "build": "astro check && astro build",
     "preview": "astro preview",
-    "check": "astro check"
+    "check": "astro check",
+    "test": "node --test tests/console.test.mjs tests/console-i18n.test.mjs tests/identity-settings.test.mjs tests/css-scale-contract.test.mjs tests/commands-shell.test.mjs",
+    "test:built": "pnpm build && node --test tests/console-built.test.mjs tests/console-lifecycle.test.mjs tests/design-system-built.test.mjs"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.4",
     "astro": "^7.3.0",
+    "happy-dom": "20.14.0",
     "typescript": "^5.9.2"
   },
-  "packageManager": "pnpm@10.33.2"
+  "packageManager": "pnpm@10.33.2",
+  "dependencies": {
+    "@lucide/astro": "1.41.0"
+  }
 }

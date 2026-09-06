@@ -18,6 +18,15 @@ import (
 var version = "dev"
 
 func main() {
+	command, err := parseServiceCommand(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if command == commandVersion {
+		fmt.Println(version)
+		return
+	}
 	cfg, err := controlserver.LoadConfig()
 	if err != nil {
 		slog.Error("invalid configuration", "error", err)
@@ -32,6 +41,14 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	if command == commandInitAnonymous {
+		if err := controlserver.InitializeAnonymousResources(ctx, cfg, true); err != nil {
+			logger.Error("anonymous initialization refused", "error", err)
+			os.Exit(1)
+		}
+		fmt.Println("Anonymous resources initialized for the verified fresh namespace.")
+		return
+	}
 
 	if err := run(ctx, cfg, logger); err != nil {
 		logger.Error("tunneld stopped", "error", err)

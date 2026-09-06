@@ -71,11 +71,13 @@ type RunRegistrationEvidence struct {
 }
 
 type RunDisconnectEvidence struct {
-	RunID              string
-	RouteID            string
-	ProxyName          string
-	ObservedOffline    bool
-	CurrentConnections int64
+	RunID                       string
+	RouteID                     string
+	ProxyName                   string
+	ObservedOffline             bool
+	ProxyNotObserved            bool
+	ConfirmedClientDisconnected bool
+	CurrentConnections          int64
 }
 
 type SweepResult struct {

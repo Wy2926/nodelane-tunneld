@@ -3,50 +3,18 @@ package identity
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
-func TestClientToken(t *testing.T) {
-	_, tokenID, token, err := NewClientCredential()
-	if err != nil {
-		t.Fatal(err)
+func TestTokenHashBindsPepperAndToken(t *testing.T) {
+	pepper := strings.Repeat("\x0b", 20)
+	const token = "Hi There"
+	const expected = "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+	if hash := HashToken(pepper, token); !TokenHashEqual(expected, hash) {
+		t.Fatalf("token hash = %q, want the HMAC-SHA256 test vector", hash)
 	}
-	parsed, err := ParseClientToken(token)
-	if err != nil || parsed != tokenID {
-		t.Fatalf("parse got %q, %v", parsed, err)
-	}
-	hash := HashToken("pepper", token)
-	if !TokenHashEqual(hash, HashToken("pepper", token)) || TokenHashEqual(hash, HashToken("other", token)) {
-		t.Fatal("token hash comparison failed")
-	}
-}
-
-func TestTunnelJWT(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0)
-	want := TunnelClaims{
-		Issuer: "nodelane-tunnel", Audience: "frp-plugin", Subject: "cli_a", SessionID: "tun_a",
-		TokenID: "tok_a", Node: "cn1", Protocol: "http", ProxyName: "tun_a", Subdomain: "demo",
-		IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Hour).Unix(),
-	}
-	token, err := SignTunnelToken([]byte("secret"), want)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := VerifyTunnelToken([]byte("secret"), token, "nodelane-tunnel", "frp-plugin", now)
-	if err != nil || got.SessionID != want.SessionID {
-		t.Fatalf("verify got %#v, %v", got, err)
-	}
-	if _, err := VerifyTunnelToken([]byte("wrong"), token, "nodelane-tunnel", "frp-plugin", now); err == nil {
-		t.Fatal("wrong key was accepted")
-	}
-}
-
-func TestSlug(t *testing.T) {
-	slug, err := NewSlug()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(slug) < 12 || strings.Count(slug, "-") != 2 {
-		t.Fatalf("unexpected slug %q", slug)
+	if TokenHashEqual(expected, HashToken("different-pepper", token)) ||
+		TokenHashEqual(expected, HashToken(pepper, "different-token")) ||
+		TokenHashEqual(expected, "") {
+		t.Fatal("changed token, pepper, or missing hash passed verification")
 	}
 }

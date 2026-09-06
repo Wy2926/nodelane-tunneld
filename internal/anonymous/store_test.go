@@ -289,6 +289,167 @@ func TestResourceFenceUsesRedisRunIDOwnerAndRevisionCAS(t *testing.T) {
 	}
 }
 
+func TestAssertFreshNamespaceAcceptsOnlyUninitializedBlockedMarker(t *testing.T) {
+	f := newRedisFixture(t, nil)
+	ctx := context.Background()
+	if err := f.store.BlockAllocations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	observed, err := f.store.ObserveResourceFence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.AssertFreshNamespace(ctx, observed); err != nil {
+		t.Fatalf("fresh blocked namespace rejected: %v", err)
+	}
+	after, err := f.store.ObserveResourceFence(ctx)
+	if err != nil || after != observed {
+		t.Fatalf("fresh assertion mutated fence: after=%#v want=%#v err=%v", after, observed, err)
+	}
+}
+
+func TestPrepareFreshInitializationRejectsReadyNamespaceWithoutMutation(t *testing.T) {
+	f := newRedisFixture(t, nil)
+	ctx := context.Background()
+	prepared, err := f.store.PrepareFreshInitialization(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.AssertFreshNamespace(ctx, prepared); err != nil {
+		t.Fatal(err)
+	}
+	marked, err := f.store.MarkResourcesVerified(ctx, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := f.client.HGetAll(ctx, f.store.readyKey()).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.store.PrepareFreshInitialization(ctx); !errors.Is(err, ErrResourcesUnverified) || got != (ResourceFence{}) {
+		t.Fatalf("ready namespace prepared again: fence=%#v err=%v", got, err)
+	}
+	after, err := f.client.HGetAll(ctx, f.store.readyKey()).Result()
+	if err != nil || !reflect.DeepEqual(after, before) {
+		t.Fatalf("rejected prepare mutated ready marker: after=%v before=%v err=%v", after, before, err)
+	}
+	observed, err := f.store.ObserveResourceFence(ctx)
+	if err != nil || observed != marked {
+		t.Fatalf("rejected prepare changed fence: got=%#v want=%#v err=%v", observed, marked, err)
+	}
+}
+
+func TestConcurrentFreshInitializationLeavesOnlyNewestFenceEligible(t *testing.T) {
+	f := newRedisFixture(t, nil)
+	ctx := context.Background()
+	type result struct {
+		fence ResourceFence
+		err   error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			<-start
+			fence, err := f.store.PrepareFreshInitialization(ctx)
+			results <- result{fence: fence, err: err}
+		}()
+	}
+	close(start)
+	first, second := <-results, <-results
+	if first.err != nil || second.err != nil {
+		t.Fatalf("concurrent prepare errors: first=%v second=%v", first.err, second.err)
+	}
+	older, newest := first.fence, second.fence
+	if older.Generation > newest.Generation {
+		older, newest = newest, older
+	}
+	if older.Generation == newest.Generation {
+		t.Fatalf("concurrent prepares reused generation: %#v %#v", older, newest)
+	}
+	if err := f.store.AssertFreshNamespace(ctx, older); !errors.Is(err, ErrResourcesUnverified) {
+		t.Fatalf("older fresh fence stayed eligible: %v", err)
+	}
+	if err := f.store.AssertFreshNamespace(ctx, newest); err != nil {
+		t.Fatalf("newest fresh fence rejected: %v", err)
+	}
+	marked, err := f.store.MarkResourcesVerified(ctx, newest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.MarkResourcesVerified(ctx, older); !errors.Is(err, ErrFenceConflict) {
+		t.Fatalf("older fresh fence won CAS: %v", err)
+	}
+	observed, err := f.store.ObserveResourceFence(ctx)
+	if err != nil || observed != marked {
+		t.Fatalf("loser changed winner marker: got=%#v want=%#v err=%v", observed, marked, err)
+	}
+}
+
+func TestAssertFreshNamespaceRejectsInitializedOrPopulatedNamespace(t *testing.T) {
+	t.Run("previous revision", func(t *testing.T) {
+		f := newRedisFixture(t, nil)
+		f.ready(t)
+		ctx := context.Background()
+		if err := f.store.BlockAllocations(ctx); err != nil {
+			t.Fatal(err)
+		}
+		observed, err := f.store.ObserveResourceFence(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.store.AssertFreshNamespace(ctx, observed); !errors.Is(err, ErrResourcesUnverified) {
+			t.Fatalf("initialized namespace accepted: %v", err)
+		}
+	})
+
+	for _, suffix := range []string{
+		":run:orphan",
+		":active:installation:orphan",
+		":resource:http:orphan",
+		":rate:network:orphan",
+		":replay:orphan",
+		":verification:quarantine",
+		":unknown",
+	} {
+		t.Run(suffix, func(t *testing.T) {
+			f := newRedisFixture(t, nil)
+			ctx := context.Background()
+			if err := f.store.BlockAllocations(ctx); err != nil {
+				t.Fatal(err)
+			}
+			observed, err := f.store.ObserveResourceFence(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.client.Set(ctx, f.prefix+suffix, "orphan", 0).Err(); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.AssertFreshNamespace(ctx, observed); !errors.Is(err, ErrResourcesUnverified) {
+				t.Fatalf("populated namespace %q accepted: %v", suffix, err)
+			}
+		})
+	}
+}
+
+func TestAssertFreshNamespaceRejectsStaleFenceObservation(t *testing.T) {
+	f := newRedisFixture(t, nil)
+	ctx := context.Background()
+	if err := f.store.BlockAllocations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	observed, err := f.store.ObserveResourceFence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.BlockAllocations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.AssertFreshNamespace(ctx, observed); !errors.Is(err, ErrResourcesUnverified) {
+		t.Fatalf("stale fresh observation accepted: %v", err)
+	}
+}
+
 func TestResourceFenceRejectsMarkerFromAnotherRedisRun(t *testing.T) {
 	f := newRedisFixture(t, nil)
 	f.ready(t)

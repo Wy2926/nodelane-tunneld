@@ -54,19 +54,21 @@ func TestPublicAPIRequestsHaveBoundedExecutionContexts(t *testing.T) {
 }
 
 func TestPublicClientConfigIsFixedAndUncacheable(t *testing.T) {
-	cfg := ClientConfig{FRP: FRPClientConfig{ServerAddr: "tunnel.test", ServerPort: 7000, TLSServerName: "frps.test", TrustedCAPEM: "public-certificate"},
+	cfg := ClientConfig{PublicDomain: "tunnel.test", FRP: FRPClientConfig{ServerAddr: "tunnel.test", ServerPort: 7000, TLSServerName: "frps.test", TrustedCAPEM: "public-certificate"},
 		OIDC: OIDCClientConfig{Issuer: "https://auth.test/oidc", ClientID: "configured-native", Resource: APIResource}}
 	router := newPublicRouter(cfg, http.NotFoundHandler(), http.NotFoundHandler(), http.NotFoundHandler(), http.NotFoundHandler())
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/client-config", nil)
 	request.Header.Set("X-Request-ID", "untrusted-caller-request-id")
 	router.ServeHTTP(response, request)
-	var body map[string]map[string]any
+	var body map[string]any
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if response.Code != 200 || response.Header().Get("Cache-Control") != "no-store" || len(body) != 2 || len(body["frp"]) != 4 || len(body["oidc"]) != 3 ||
-		body["frp"]["trusted_ca_pem"] != "public-certificate" || body["oidc"]["client_id"] != "configured-native" {
+	frp, frpOK := body["frp"].(map[string]any)
+	oidc, oidcOK := body["oidc"].(map[string]any)
+	if response.Code != 200 || response.Header().Get("Cache-Control") != "no-store" || len(body) != 3 || !frpOK || !oidcOK || len(frp) != 4 || len(oidc) != 3 ||
+		frp["trusted_ca_pem"] != "public-certificate" || oidc["client_id"] != "configured-native" || body["public_domain"] != "tunnel.test" {
 		t.Fatalf("unsafe bootstrap: %d %s", response.Code, response.Body.String())
 	}
 	if id := response.Header().Get("X-Request-ID"); id == "" || id == "untrusted-caller-request-id" {

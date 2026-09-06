@@ -4,6 +4,7 @@ import SiteLayout from "../layouts/SiteLayout.astro";
 import QuickStart from "./QuickStart.astro";
 import SiteFooter from "./SiteFooter.astro";
 import SiteHeader from "./SiteHeader.astro";
+import { consoleURL } from '../console/model';
 
 interface Props {
   locale: Locale;
@@ -11,6 +12,12 @@ interface Props {
 }
 
 const { locale, copy } = Astro.props;
+const consoleLabels = copy.console;
+const accessRows = [
+  { term: consoleLabels.protocol, anonymous: 'HTTP / TCP / UDP', account: 'HTTP' },
+  { term: consoleLabels.domain, anonymous: consoleLabels.randomName, account: consoleLabels.permanentName },
+  { term: copy.access.rows[2].term, anonymous: copy.hero.facts[1].value, account: consoleLabels.unlimited },
+];
 ---
 
 <SiteLayout locale={locale} copy={copy}>
@@ -42,7 +49,7 @@ const { locale, copy } = Astro.props;
               {copy.hero.facts.map((fact) => <div><dt>{fact.term}</dt><dd>{fact.value}</dd></div>)}
             </dl>
           </div>
-          <QuickStart copy={copy.quickstart} />
+          <QuickStart copy={copy.quickstart} locale={locale} />
         </div>
       </div>
       <a class="scroll-cue" href="#protocols" aria-label={copy.hero.scrollLabel}>
@@ -82,39 +89,33 @@ const { locale, copy } = Astro.props;
         <div class="section-topline">{copy.access.topline}</div>
         <div class="section-heading">
           <div>
-            <p class="section-kicker">{copy.access.kicker}</p>
-            <h2 id="access-title">{copy.access.title}</h2>
+            <p class="section-kicker">NodeLane Tunnel</p>
+            <h2 id="access-title">{consoleLabels.permanent}</h2>
           </div>
-          <p class="section-lead">{copy.access.lead}</p>
+          <a class="console-home-entry" href={consoleURL(locale)}>{consoleLabels.login}</a>
         </div>
 
-        <div class="comparison" role="table" aria-label={copy.access.comparisonLabel}>
+        <div class="comparison" role="table" aria-label={consoleLabels.permanent}>
           <div class="comparison-head" role="row">
-            <div class="legend" role="columnheader">{copy.access.legend.split("\n").map((line) => <span>{line}</span>)}</div>
+            <div class="legend" role="columnheader">{consoleLabels.protocol}</div>
             <div class="plan-title featured" role="columnheader">
-              <span class="plan-meta">{copy.access.anonymous.status}</span>
-              <h3>{copy.access.anonymous.title}</h3>
-              <p>{copy.access.anonymous.description}</p>
+              <span class="plan-meta">{consoleLabels.available}</span>
+              <h3>{consoleLabels.anonymous}</h3>
             </div>
             <div class="plan-title" role="columnheader">
-              <span class="plan-meta">{copy.access.account.status}</span>
-              <h3>{copy.access.account.title}</h3>
-              <p>{copy.access.account.description}</p>
+              <span class="plan-meta">{consoleLabels.available}</span>
+              <h3>{consoleLabels.account}</h3>
             </div>
           </div>
-          {copy.access.rows.map((row) => (
-            <div class:list={["comparison-row", { difference: "better" in row && row.better }] } role="row">
+          {accessRows.map((row) => (
+            <div class="comparison-row" role="row">
               <div role="rowheader">{row.term}</div>
-              <div role="cell" class:list={{ unavailable: "unavailable" in row && row.unavailable }}>{row.anonymous}</div>
-              <div role="cell" class:list={{ better: "better" in row && row.better }}>{row.account}</div>
+              <div role="cell">{row.anonymous}</div>
+              <div role="cell">{row.account}</div>
             </div>
           ))}
-          <div class="comparison-foot" role="row">
-            <span role="rowheader">{copy.access.recommended}</span>
-            <p role="cell">{copy.access.anonymousUse}</p>
-            <p role="cell">{copy.access.accountUse}</p>
-          </div>
         </div>
+        <p class="access-limit">{consoleLabels.safetyLimit}</p>
 
         <aside class="safety">
           <strong>{copy.access.safetyLabel}</strong>

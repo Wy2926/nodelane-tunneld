@@ -11,7 +11,8 @@ import (
 
 func TestNativeClientObservationRequiresExactOnlineRunAndLiteralIP(t *testing.T) {
 	const id = "run_aaaaaaaaaaaaaaaaaaaaaaaaaa"
-	valid := `{"code":200,"msg":"success","data":{"total":1,"page":1,"pageSize":2,"items":[{"key":"run_aaaaaaaaaaaaaaaaaaaaaaaaaa","user":"","clientID":"run_aaaaaaaaaaaaaaaaaaaaaaaaaa","runID":"run_aaaaaaaaaaaaaaaaaaaaaaaaaa","hostname":"host","firstConnectedAt":1,"lastConnectedAt":1,"online":true,"clientIP":"198.51.100.8"}]}}`
+	const session = "fcs_bbbbbbbbbbbbbbbbbbbbbbbbbb"
+	valid := `{"code":200,"msg":"success","data":{"total":1,"page":1,"pageSize":2,"items":[{"key":"run_aaaaaaaaaaaaaaaaaaaaaaaaaa","user":"","clientID":"run_aaaaaaaaaaaaaaaaaaaaaaaaaa","runID":"fcs_bbbbbbbbbbbbbbbbbbbbbbbbbb","hostname":"host","firstConnectedAt":1,"lastConnectedAt":1,"online":true,"clientIP":"198.51.100.8"}]}}`
 	for _, test := range []struct {
 		name, body string
 		valid      bool
@@ -19,7 +20,7 @@ func TestNativeClientObservationRequiresExactOnlineRunAndLiteralIP(t *testing.T)
 		{"matching native client", valid, true},
 		{"business code mismatch", strings.ReplaceAll(valid, `"code":200`, `"code":0`), false},
 		{"offline", strings.ReplaceAll(valid, `"online":true`, `"online":false`), false},
-		{"different run", strings.ReplaceAll(valid, `"runID":"`+id+`"`, `"runID":"run_bbbbbbbbbbbbbbbbbbbbbbbbbb"`), false},
+		{"legacy logical session", strings.ReplaceAll(valid, session, id), false},
 		{"nonliteral IP", strings.ReplaceAll(valid, "198.51.100.8", "attacker.test"), false},
 		{"case alias", strings.ReplaceAll(valid, "clientIP", "ClientIP"), false},
 		{"duplicate identity", strings.ReplaceAll(valid, `"online":true`, `"online":true,"online":true`), false},
@@ -28,7 +29,7 @@ func TestNativeClientObservationRequiresExactOnlineRunAndLiteralIP(t *testing.T)
 		t.Run(test.name, func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				user, password, ok := r.BasicAuth()
-				if !ok || user != "admin" || password != "private-password" || r.URL.Path != "/api/v2/clients" || r.URL.Query().Get("runID") != id || r.URL.Query().Get("clientID") != id || r.URL.Query().Get("status") != "online" || r.URL.Query().Get("pageSize") != "2" {
+				if !ok || user != "admin" || password != "private-password" || r.URL.Path != "/api/v2/clients" || r.URL.Query().Has("runID") || r.URL.Query().Get("clientID") != id || r.URL.Query().Has("status") || !r.URL.Query().Has("user") || r.URL.Query().Get("user") != "" || r.URL.Query().Get("pageSize") != "2" {
 					t.Error("unsafe native client request")
 				}
 				w.Header().Set("Content-Type", "application/json")

@@ -1,0 +1,31 @@
+---
+import { ChevronDown, Globe } from '@lucide/astro';
+import { getLocalePath, localeDefinitions, type Locale } from '../i18n/index.ts';
+
+interface Props {
+  locale: Locale;
+  label: string;
+  id?: string;
+}
+
+const { locale, label, id } = Astro.props;
+---
+
+<label class="language-switch" data-language-switch>
+  <span class="visually-hidden">{label}</span>
+  <Globe class="language-icon" size={14} aria-hidden="true" />
+  <select id={id} data-language-select aria-label={label} lang={locale}>
+    {localeDefinitions.map((definition) => (
+      <option
+        value={definition.code}
+        data-path={getLocalePath(definition.code)}
+        lang={definition.code}
+        dir={definition.direction}
+        selected={definition.code === locale}
+      >
+        {definition.nativeName}
+      </option>
+    ))}
+  </select>
+  <ChevronDown class="language-chevron" size={10} aria-hidden="true" />
+</label>

@@ -74,21 +74,22 @@ type LaunchCode struct {
 }
 
 type Run struct {
-	ID                string       `json:"id"`
-	RouteID           string       `json:"route_id"`
-	StartedVia        StartedVia   `json:"started_via"`
-	Status            RunStatus    `json:"status"`
-	DesiredState      DesiredState `json:"desired_state"`
-	RequestIP         netip.Addr   `json:"request_ip"`
-	ConnectedIP       netip.Addr   `json:"connected_ip,omitempty"`
-	CreatedAt         time.Time    `json:"created_at"`
-	ConnectedAt       *time.Time   `json:"connected_at,omitempty"`
-	LastHeartbeatAt   *time.Time   `json:"last_heartbeat_at,omitempty"`
-	StopRequestedAt   *time.Time   `json:"stop_requested_at,omitempty"`
-	StoppedAt         *time.Time   `json:"stopped_at,omitempty"`
-	ConnectDeadlineAt time.Time    `json:"connect_deadline_at"`
-	LeaseExpiresAt    *time.Time   `json:"lease_expires_at,omitempty"`
-	StopReason        string       `json:"stop_reason,omitempty"`
+	ID                       string       `json:"id"`
+	RouteID                  string       `json:"route_id"`
+	StartedVia               StartedVia   `json:"started_via"`
+	Status                   RunStatus    `json:"status"`
+	DesiredState             DesiredState `json:"desired_state"`
+	RequestIP                netip.Addr   `json:"request_ip"`
+	ConnectedIP              netip.Addr   `json:"connected_ip,omitempty"`
+	CreatedAt                time.Time    `json:"created_at"`
+	ConnectedAt              *time.Time   `json:"connected_at,omitempty"`
+	LastHeartbeatAt          *time.Time   `json:"last_heartbeat_at,omitempty"`
+	StopRequestedAt          *time.Time   `json:"stop_requested_at,omitempty"`
+	StoppedAt                *time.Time   `json:"stopped_at,omitempty"`
+	ConnectDeadlineAt        time.Time    `json:"connect_deadline_at"`
+	LeaseExpiresAt           *time.Time   `json:"lease_expires_at,omitempty"`
+	StopReason               string       `json:"stop_reason,omitempty"`
+	ProxyRegistrationGranted bool         `json:"-"`
 }
 
 type RunCredential struct {

@@ -137,5 +137,5 @@ func makeRunDTO(run domain.Run) runDTO {
 }
 
 func (s *Server) publicURL(subdomain string) string {
-	return fmt.Sprintf("https://%s.%s", subdomain, s.publicDomain)
+	return fmt.Sprintf("http://%s.%s", subdomain, s.publicDomain)
 }

@@ -85,6 +85,11 @@ func (a *recordingAuthorizer) NewUserConn(context.Context, frpplugin.NewUserConn
 	return domain.RunAuthorization{}, a.err
 }
 
+func (a *recordingAuthorizer) CloseProxy(context.Context, frpplugin.CloseProxyContent) (domain.RunAuthorization, error) {
+	a.calls = append(a.calls, frpplugin.OpCloseProxy)
+	return domain.RunAuthorization{}, a.err
+}
+
 func TestDispatcherInvokesRegisteredAuthorizerForEveryAuthorizationCallback(t *testing.T) {
 	operations := []struct {
 		op      frpplugin.Operation
@@ -195,15 +200,23 @@ func TestDispatcherRejectsMalformedContentBeforeAuthorization(t *testing.T) {
 	}
 }
 
-func TestDispatcherTreatsCloseProxyAsNotificationOnly(t *testing.T) {
+func TestDispatcherTreatsCloseProxyAsAuthorizedNotificationOnly(t *testing.T) {
 	authorizer := &recordingAuthorizer{}
 	dispatcher := mustDispatcher(t, authorizer)
 	response, err := dispatcher.Dispatch(context.Background(), frpplugin.Request{Op: frpplugin.OpCloseProxy, Content: json.RawMessage(`{"user":{"metas":{"nodelane_run_token":"secret"}},"proxy_name":"rte_test"}`)})
 	if err != nil || response.Reject || !response.Unchange {
 		t.Fatalf("Dispatch = (%#v, %v), want ignored notification", response, err)
 	}
-	if len(authorizer.calls) != 0 {
-		t.Fatalf("CloseProxy authorized or changed state: %#v", authorizer.calls)
+	if len(authorizer.calls) != 1 || authorizer.calls[0] != frpplugin.OpCloseProxy {
+		t.Fatalf("CloseProxy bypassed authorization: %#v", authorizer.calls)
+	}
+}
+
+func TestDispatcherRejectsUnauthorizedCloseNotification(t *testing.T) {
+	dispatcher := mustDispatcher(t, &recordingAuthorizer{err: frpauth.ErrInvalidCredential})
+	response, err := dispatcher.Dispatch(context.Background(), frpplugin.Request{Op: frpplugin.OpCloseProxy, Content: json.RawMessage(`{"user":{"metas":{}},"proxy_name":"rte_test"}`)})
+	if err != nil || !response.Reject || response.RejectReason != InvalidCredentialReason {
+		t.Fatal("CloseProxy ignored invalid session")
 	}
 }
 

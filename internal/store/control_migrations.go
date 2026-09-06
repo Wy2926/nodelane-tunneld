@@ -33,8 +33,10 @@ func MigrateControlDatabase(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	_, err = provider.Up(ctx)
-	return err
+	if _, err := provider.Up(ctx); err != nil {
+		return err
+	}
+	return validateControlSchemaState(ctx, db)
 }
 
 func newControlMigrationProvider(db *sql.DB) (*goose.Provider, error) {
@@ -136,6 +138,40 @@ func validateControlSchemaStateInSnapshot(ctx context.Context, queryer controlSc
 	}
 	if !exists || version != 1 {
 		return fmt.Errorf("refuse unsupported control schema version %d", version)
+	}
+	return validateControlSchemaContract(ctx, queryer)
+}
+
+func validateControlSchemaContract(ctx context.Context, queryer controlSchemaQueryer) error {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT column_name,data_type,is_nullable,COALESCE(column_default,'')
+		FROM information_schema.columns
+		WHERE table_schema=current_schema() AND table_name='tunnel_runs'
+		  AND column_name IN ('proxy_registration_granted','reconciliation_claimed_at')`)
+	if err != nil {
+		return fmt.Errorf("inspect control schema contract: %w", err)
+	}
+	defer rows.Close()
+	type columnContract struct {
+		dataType, nullable, defaultSQL string
+	}
+	columns := make(map[string]columnContract, 2)
+	for rows.Next() {
+		var name string
+		var column columnContract
+		if err := rows.Scan(&name, &column.dataType, &column.nullable, &column.defaultSQL); err != nil {
+			return fmt.Errorf("inspect control schema contract: %w", err)
+		}
+		columns[name] = column
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("inspect control schema contract: %w", err)
+	}
+	registration, hasRegistration := columns["proxy_registration_granted"]
+	claimed, hasClaimed := columns["reconciliation_claimed_at"]
+	if len(columns) != 2 || !hasRegistration || registration != (columnContract{"boolean", "NO", "false"}) ||
+		!hasClaimed || claimed != (columnContract{"timestamp with time zone", "YES", ""}) {
+		return fmt.Errorf("refuse unsupported control schema contract")
 	}
 	return nil
 }

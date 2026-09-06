@@ -123,7 +123,9 @@ func (p *ControlPostgres) ConfirmOnline(ctx context.Context, evidence domain.Run
 			lease = &expires
 		}
 		result, err = scanControlRun(tx.QueryRowContext(ctx, `UPDATE tunnel_runs
-			SET status='online',connected_at=$2,connected_ip=$3,lease_expires_at=$4 WHERE id=$1 RETURNING `+controlRunColumns,
+			SET status='online',connected_at=$2,connected_ip=$3,lease_expires_at=$4,
+				proxy_registration_granted=TRUE
+			WHERE id=$1 RETURNING `+controlRunColumns,
 			run.ID, connectedAt, evidence.ConnectedIP.Unmap().String(), lease))
 		return err
 	})
@@ -134,7 +136,9 @@ func (p *ControlPostgres) ConfirmOnline(ctx context.Context, evidence domain.Run
 }
 
 func (p *ControlPostgres) ConfirmOffline(ctx context.Context, evidence domain.RunDisconnectEvidence) (domain.Run, error) {
-	if !evidence.ObservedOffline || evidence.CurrentConnections != 0 || evidence.RunID == "" || evidence.RouteID == "" || evidence.ProxyName == "" {
+	offlineSample := evidence.ObservedOffline && !evidence.ProxyNotObserved && !evidence.ConfirmedClientDisconnected
+	drainedAbsent := !evidence.ObservedOffline && evidence.ProxyNotObserved && evidence.ConfirmedClientDisconnected
+	if (!offlineSample && !drainedAbsent) || evidence.CurrentConnections != 0 || evidence.RunID == "" || evidence.RouteID == "" || evidence.ProxyName == "" {
 		return domain.Run{}, domain.ErrRunEvidenceInvalid
 	}
 	var result domain.Run
@@ -142,6 +146,9 @@ func (p *ControlPostgres) ConfirmOffline(ctx context.Context, evidence domain.Ru
 		route, run, credential, err := lockControlEvidenceRun(ctx, tx, evidence.RunID, evidence.RouteID, evidence.ProxyName)
 		if err != nil {
 			return err
+		}
+		if drainedAbsent && !run.ProxyRegistrationGranted {
+			return domain.ErrRunEvidenceInvalid
 		}
 		if run.Status == domain.RunOffline {
 			result = run

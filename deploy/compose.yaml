@@ -7,13 +7,113 @@ services:
         VERSION: ${TUNNELD_VERSION:-dev}
         NT_VERSION: ${NT_VERSION:-}
     restart: unless-stopped
-    # Production target is Linux. Host networking preserves the loopback
-    # trust boundary between Caddy/frps and tunneld.
+    init: true
+    read_only: true
+    # Linux host networking keeps plugin/admin listeners on literal loopback.
     network_mode: host
-    env_file:
-      - ../.env
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "5"
+    depends_on:
+      - frps
+    environment:
+      TZ: UTC
+      LISTEN_ADDR: 127.0.0.1:9000
+      FRP_PLUGIN_LISTEN_ADDR: 127.0.0.1:9001
+      RELEASE_DIR: /releases
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://tunnel.nodelane.net}
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-tunnel.nodelane.net}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      REDIS_ADDR: ${REDIS_ADDR:?Set REDIS_ADDR}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PREFIX: ${REDIS_PREFIX:-nodelane:tunnel:control}
+      CONTROL_LAUNCH_PEPPER: ${CONTROL_LAUNCH_PEPPER:?Set CONTROL_LAUNCH_PEPPER}
+      CONTROL_RUN_PEPPER: ${CONTROL_RUN_PEPPER:?Set CONTROL_RUN_PEPPER}
+      CONTROL_REPLAY_KEY: ${CONTROL_REPLAY_KEY:?Set CONTROL_REPLAY_KEY}
+      SESSION_ENCRYPTION_KEY: ${SESSION_ENCRYPTION_KEY:?Set SESSION_ENCRYPTION_KEY}
+      ANONYMOUS_CREDENTIAL_PEPPER: ${ANONYMOUS_CREDENTIAL_PEPPER:?Set ANONYMOUS_CREDENTIAL_PEPPER}
+      ANONYMOUS_REPLAY_KEY: ${ANONYMOUS_REPLAY_KEY:?Set ANONYMOUS_REPLAY_KEY}
+      ANONYMOUS_FENCE_OWNER_TOKEN: ${ANONYMOUS_FENCE_OWNER_TOKEN:?Set ANONYMOUS_FENCE_OWNER_TOKEN}
+      OIDC_ISSUER: ${OIDC_ISSUER:-https://auth.nodelane.net/oidc}
+      OIDC_WEB_CLIENT_ID: ${OIDC_WEB_CLIENT_ID:?Set OIDC_WEB_CLIENT_ID}
+      OIDC_WEB_CLIENT_SECRET: ${OIDC_WEB_CLIENT_SECRET:?Set OIDC_WEB_CLIENT_SECRET}
+      OIDC_NATIVE_CLIENT_ID: ${OIDC_NATIVE_CLIENT_ID:?Set OIDC_NATIVE_CLIENT_ID}
+      FRP_SERVER_ADDR: ${FRP_SERVER_ADDR:-tunnel.nodelane.net}
+      FRP_SERVER_PORT: ${FRP_SERVER_PORT:-7000}
+      FRP_TLS_SERVER_NAME: ${FRP_TLS_SERVER_NAME:-tunnel.nodelane.net}
+      FRP_BANDWIDTH_LIMIT: ${FRP_BANDWIDTH_LIMIT:-5MB}
+      FRP_TRUSTED_CA_FILE: ${FRP_TRUSTED_CA_FILE:?Set FRP_TRUSTED_CA_FILE}
+      FRPS_CONFIG_FILE: ${FRPS_CONFIG_FILE:?Set FRPS_CONFIG_FILE}
+      FRPS_CERT_FILE: ${FRPS_CERT_FILE:?Set FRPS_CERT_FILE}
+      FRPS_KEY_FILE: ${FRPS_KEY_FILE:?Set FRPS_KEY_FILE}
+      FRPS_ADMIN_URL: http://127.0.0.1:7500
+      FRPS_ADMIN_USERNAME: ${FRPS_ADMIN_USERNAME:?Set FRPS_ADMIN_USERNAME}
+      FRPS_ADMIN_PASSWORD: ${FRPS_ADMIN_PASSWORD:?Set FRPS_ADMIN_PASSWORD}
+      TCP_PORT_START: ${TCP_PORT_START:-20000}
+      TCP_PORT_END: ${TCP_PORT_END:-29999}
+      UDP_PORT_START: ${UDP_PORT_START:-30000}
+      UDP_PORT_END: ${UDP_PORT_END:-39999}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-127.0.0.1/32,::1/128}
+    volumes:
+      - type: bind
+        source: ${FRPS_CONFIG_FILE:?Set FRPS_CONFIG_FILE}
+        target: ${FRPS_CONFIG_FILE:?Set FRPS_CONFIG_FILE}
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${FRP_TRUSTED_CA_FILE:?Set FRP_TRUSTED_CA_FILE}
+        target: ${FRP_TRUSTED_CA_FILE:?Set FRP_TRUSTED_CA_FILE}
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${FRPS_CERT_FILE:?Set FRPS_CERT_FILE}
+        target: ${FRPS_CERT_FILE:?Set FRPS_CERT_FILE}
+        read_only: true
+        bind: { create_host_path: false }
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    stop_grace_period: 15s
+  frps:
+    image: ghcr.io/fatedier/frps:v0.70.0
+    command: ["-c", "${FRPS_CONFIG_FILE:?Set FRPS_CONFIG_FILE}"]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    network_mode: host
+    environment:
+      TZ: UTC
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-tunnel.nodelane.net}
+      FRP_SERVER_PORT: ${FRP_SERVER_PORT:-7000}
+      FRPS_CERT_FILE: ${FRPS_CERT_FILE:?Set FRPS_CERT_FILE}
+      FRPS_KEY_FILE: ${FRPS_KEY_FILE:?Set FRPS_KEY_FILE}
+      FRPS_ADMIN_USERNAME: ${FRPS_ADMIN_USERNAME:?Set FRPS_ADMIN_USERNAME}
+      FRPS_ADMIN_PASSWORD: ${FRPS_ADMIN_PASSWORD:?Set FRPS_ADMIN_PASSWORD}
+      TCP_PORT_START: ${TCP_PORT_START:-20000}
+      TCP_PORT_END: ${TCP_PORT_END:-29999}
+      UDP_PORT_START: ${UDP_PORT_START:-30000}
+      UDP_PORT_END: ${UDP_PORT_END:-39999}
+    volumes:
+      - type: bind
+        source: ${FRPS_CONFIG_FILE:?Set FRPS_CONFIG_FILE}
+        target: ${FRPS_CONFIG_FILE:?Set FRPS_CONFIG_FILE}
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${FRP_TRUSTED_CA_FILE:?Set FRP_TRUSTED_CA_FILE}
+        target: ${FRP_TRUSTED_CA_FILE:?Set FRP_TRUSTED_CA_FILE}
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${FRPS_CERT_FILE:?Set FRPS_CERT_FILE}
+        target: ${FRPS_CERT_FILE:?Set FRPS_CERT_FILE}
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${FRPS_KEY_FILE:?Set FRPS_KEY_FILE}
+        target: ${FRPS_KEY_FILE:?Set FRPS_KEY_FILE}
+        read_only: true
+        bind: { create_host_path: false }
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    stop_grace_period: 15s

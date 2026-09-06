@@ -38,6 +38,12 @@ type Store struct {
 
 var rawBase32 = base32.StdEncoding.WithPadding(base32.NoPadding)
 
+const (
+	freshNamespaceTimeout      = 3 * time.Second
+	freshNamespaceScanCount    = int64(100)
+	freshNamespaceMaxScanPages = 100
+)
+
 func NewStore(config Config) (*Store, error) {
 	if config.Client == nil || !validPrefix(config.Prefix) || len(config.CredentialPepper) < 32 || len(config.ReplayKey) != 32 || len(config.FenceOwnerToken) < 32 ||
 		hmac.Equal(config.CredentialPepper, config.ReplayKey) || hmac.Equal(config.CredentialPepper, config.FenceOwnerToken) ||
@@ -156,6 +162,71 @@ func (s *Store) ObserveResourceFence(ctx context.Context) (ResourceFence, error)
 		return ResourceFence{}, ErrUnavailable
 	}
 	return ResourceFence{RedisRunID: redisRunID, Revision: revision, Generation: generation}, nil
+}
+
+func (s *Store) PrepareFreshInitialization(ctx context.Context) (ResourceFence, error) {
+	values, err := prepareFreshInitializationScript.Run(ctx, s.client, []string{s.readyKey()}).Slice()
+	if err != nil || len(values) != 4 {
+		return ResourceFence{}, ErrUnavailable
+	}
+	code, codeOK := parseInt64(values[0])
+	if !codeOK {
+		return ResourceFence{}, ErrUnavailable
+	}
+	if code == -2 {
+		return ResourceFence{}, ErrResourcesUnverified
+	}
+	if code != 1 {
+		return ResourceFence{}, ErrUnavailable
+	}
+	redisRunID, runOK := asString(values[1])
+	revision, revisionOK := asString(values[2])
+	generation, generationOK := parseInt64(values[3])
+	if !runOK || !revisionOK || !generationOK || !validRedisRunID(redisRunID) || revision != "" || generation < 1 {
+		return ResourceFence{}, ErrInvalidState
+	}
+	return ResourceFence{RedisRunID: redisRunID, Revision: revision, Generation: generation}, nil
+}
+
+func (s *Store) AssertFreshNamespace(ctx context.Context, observed ResourceFence) error {
+	if !validRedisRunID(observed.RedisRunID) || observed.Generation < 0 || observed.Revision != "" && !validRandomIdentifier(observed.Revision, "afr_", 16) {
+		return ErrInvalidRequest
+	}
+	if observed.Revision != "" {
+		return ErrResourcesUnverified
+	}
+	guardCtx, cancel := context.WithTimeout(ctx, freshNamespaceTimeout)
+	defer cancel()
+	values, err := assertFreshNamespaceFenceScript.Run(guardCtx, s.client, []string{s.readyKey()},
+		observed.RedisRunID, observed.Revision, observed.Generation).Slice()
+	if err != nil || len(values) != 1 {
+		return ErrUnavailable
+	}
+	code, ok := parseInt64(values[0])
+	if !ok {
+		return ErrUnavailable
+	}
+	if code != 1 {
+		return ErrResourcesUnverified
+	}
+
+	var cursor uint64
+	for range freshNamespaceMaxScanPages {
+		keys, next, err := s.client.Scan(guardCtx, cursor, s.prefix+":*", freshNamespaceScanCount).Result()
+		if err != nil {
+			return ErrUnavailable
+		}
+		for _, key := range keys {
+			if key != s.readyKey() {
+				return ErrResourcesUnverified
+			}
+		}
+		if next == 0 {
+			return nil
+		}
+		cursor = next
+	}
+	return ErrResourcesUnverified
 }
 
 func (s *Store) MarkResourcesVerified(ctx context.Context, observed ResourceFence) (ResourceFence, error) {

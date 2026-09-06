@@ -28,9 +28,11 @@ if not defined NT_BIN_DIR set "NT_BIN_DIR=%LOCALAPPDATA%\nodelane\bin"
 set "NT_CURRENT=%NT_DATA%\current"
 set "NT_LAUNCHER=%NT_BIN_DIR%\nt.cmd"
 set "NT_WORK=%TEMP%\nodelane-tunnel-install-%RANDOM%-%RANDOM%"
+set "NT_WORK_OWNED="
 
 mkdir "%NT_WORK%" >nul 2>&1
 if errorlevel 1 set "NT_MESSAGE=Unable to create temporary directory: %NT_WORK%" & goto fail
+set "NT_WORK_OWNED=1"
 if not exist "%NT_VERSIONS%\." mkdir "%NT_VERSIONS%" >nul 2>&1
 if not exist "%NT_VERSIONS%\." set "NT_MESSAGE=Unable to create installation directory: %NT_VERSIONS%" & goto fail
 if not exist "%NT_BIN_DIR%\." mkdir "%NT_BIN_DIR%" >nul 2>&1
@@ -42,8 +44,9 @@ if errorlevel 1 set "NT_MESSAGE=Unable to download the latest release version." 
 set "NT_VERSION="
 set /p "NT_VERSION="<"%NT_WORK%\stable.txt"
 setlocal EnableDelayedExpansion
-echo(!NT_VERSION!| findstr.exe /R /X "[0-9A-Za-z._-][0-9A-Za-z._-]*" >nul
+echo(!NT_VERSION!| findstr.exe /R /X "[0-9][0-9A-Za-z._-]*" >nul
 if errorlevel 1 endlocal & set "NT_MESSAGE=The server returned an invalid release version." & goto fail
+if not "!NT_VERSION:~64,1!"=="" endlocal & set "NT_MESSAGE=The server returned an invalid release version." & goto fail
 endlocal
 
 set "NT_ASSET=nt_%NT_VERSION%_windows_%NT_ARCH%.zip"
@@ -146,7 +149,7 @@ if exist "%NT_WORK%" rmdir /s /q "%NT_WORK%"
 exit /b %errorlevel%
 
 :fail
-if defined NT_WORK if exist "%NT_WORK%" rmdir /s /q "%NT_WORK%"
+if defined NT_WORK_OWNED if exist "%NT_WORK%" rmdir /s /q "%NT_WORK%"
 if not defined NT_MESSAGE set "NT_MESSAGE=NodeLane Tunnel installation failed."
 echo ERROR %NT_MESSAGE% 1>&2
 exit /b 1

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -31,10 +30,17 @@ type proof struct {
 }
 
 type recordingStore struct {
-	run        anonymous.Run
-	err        error
-	loginCalls []proof
-	proxyCalls []proof
+	run             anonymous.Run
+	err             error
+	loginCalls      []proof
+	proxyCalls      []proof
+	registrations   []proof
+	registrationErr error
+}
+
+func (s *recordingStore) AuthorizeProxyRegistration(_ context.Context, runID, token, proxyName string) (anonymous.Run, error) {
+	s.registrations = append(s.registrations, proof{runID: runID, token: token, proxyName: proxyName})
+	return s.run, s.registrationErr
 }
 
 func (s *recordingStore) AuthorizeLogin(_ context.Context, runID, token string) (anonymous.Run, error) {
@@ -66,10 +72,10 @@ func TestLoginNormalizesAnonymousSessionIdentity(t *testing.T) {
 	if !ok {
 		t.Fatalf("response content type = %T", response.Content)
 	}
-	if got.RunID != testRunID || got.ClientID != testRunID {
+	if !frpplugin.ValidSessionID(got.RunID) || got.RunID == input.RunID || got.ClientID != testRunID {
 		t.Fatalf("normalized identity = %q/%q, want %q", got.RunID, got.ClientID, testRunID)
 	}
-	if !reflect.DeepEqual(got.Metas, testMetas()) {
+	if len(got.Metas) != 3 || got.Metas[frpplugin.MetadataRunID] != testRunID || got.Metas[frpplugin.MetadataRunToken] != testRunToken || got.Metas[frpplugin.MetadataSessionID] != got.RunID {
 		t.Fatalf("Login metadata = %#v; frps must retain it for later callback reauthorization", got.Metas)
 	}
 	if got.Version != input.Version || got.Hostname != input.Hostname || got.PoolCount != input.PoolCount {
@@ -87,7 +93,7 @@ func TestWorkConnectionCannotUseInheritedMetadataAsCallerProof(t *testing.T) {
 	// Stock frps supplies User from the existing control session, not from
 	// the newly arriving work connection. This is not caller-owned proof.
 	content := frpplugin.NewWorkConnContent{
-		User: testUser(), RunID: testRunID, Timestamp: timestamp,
+		User: testUser(), RunID: testSessionID, Timestamp: timestamp,
 		PrivilegeKey: frputil.GetAuthKey("", timestamp),
 	}
 	response, err := dispatcher.Dispatch(context.Background(), request(t, frpplugin.OpNewWorkConn, content))
@@ -108,7 +114,7 @@ func TestConnectionCallbacksRequireDirectCredentialBeforeStore(t *testing.T) {
 				case frpplugin.OpPing:
 					content = frpplugin.PingContent{User: testUser(), PrivilegeKey: token}
 				case frpplugin.OpNewWorkConn:
-					content = frpplugin.NewWorkConnContent{User: testUser(), RunID: testRunID, PrivilegeKey: token}
+					content = frpplugin.NewWorkConnContent{User: testUser(), RunID: testSessionID, PrivilegeKey: token}
 				}
 				response, err := mustDispatcher(t, store).Dispatch(context.Background(), request(t, operation, content))
 				if err != nil || !response.Reject || !response.Unchange || response.Content != nil || len(store.loginCalls) != 0 {
@@ -131,7 +137,7 @@ func TestAuthorizedAnonymousCallerProofBecomesNativeChecksumIncludingZeroTimesta
 			case frpplugin.OpPing:
 				content = frpplugin.PingContent{User: testUser(), PrivilegeKey: testRunToken, Timestamp: timestamp}
 			case frpplugin.OpNewWorkConn:
-				content = frpplugin.NewWorkConnContent{User: testUser(), RunID: testRunID, PrivilegeKey: testRunToken, Timestamp: timestamp}
+				content = frpplugin.NewWorkConnContent{User: testUser(), RunID: testSessionID, PrivilegeKey: testRunToken, Timestamp: timestamp}
 			}
 			response, err := mustDispatcher(t, store).Dispatch(context.Background(), request(t, operation, content))
 			if err != nil || response.Reject || response.Unchange || response.Content == nil {
@@ -172,7 +178,7 @@ func TestEveryAnonymousCallbackReauthorizesFreshStoreState(t *testing.T) {
 	}{
 		{name: "Login", op: frpplugin.OpLogin, content: frpplugin.LoginContent{Metas: testMetas(), PrivilegeKey: testRunToken}, wantLoginCalls: 1},
 		{name: "Ping", op: frpplugin.OpPing, content: frpplugin.PingContent{User: testUser(), PrivilegeKey: testRunToken}, wantLoginCalls: 1},
-		{name: "NewWorkConn", op: frpplugin.OpNewWorkConn, content: frpplugin.NewWorkConnContent{User: testUser(), RunID: testRunID, PrivilegeKey: testRunToken}, wantLoginCalls: 1},
+		{name: "NewWorkConn", op: frpplugin.OpNewWorkConn, content: frpplugin.NewWorkConnContent{User: testUser(), RunID: testSessionID, PrivilegeKey: testRunToken}, wantLoginCalls: 1},
 		{name: "NewProxy", op: frpplugin.OpNewProxy, content: validHTTPProxy(), wantProxyCalls: 1},
 		{name: "NewUserConn", op: frpplugin.OpNewUserConn, content: frpplugin.NewUserConnContent{User: testUser(), ProxyName: testProxy, ProxyType: "http", RemoteAddr: "192.0.2.1:4567"}, wantProxyCalls: 1},
 		{name: "CloseProxy", op: frpplugin.OpCloseProxy, content: frpplugin.CloseProxyContent{User: testUser(), ProxyName: testProxy}, wantProxyCalls: 1},
@@ -191,6 +197,13 @@ func TestEveryAnonymousCallbackReauthorizesFreshStoreState(t *testing.T) {
 			if len(store.loginCalls) != 2*test.wantLoginCalls || len(store.proxyCalls) != 2*test.wantProxyCalls {
 				t.Fatalf("store calls = login:%#v proxy:%#v", store.loginCalls, store.proxyCalls)
 			}
+			wantRegistrations := 0
+			if test.op == frpplugin.OpNewProxy {
+				wantRegistrations = 2
+			}
+			if len(store.registrations) != wantRegistrations {
+				t.Fatalf("registration grants = %d, want %d", len(store.registrations), wantRegistrations)
+			}
 		})
 	}
 }
@@ -203,6 +216,7 @@ func TestCredentialMetadataIsExactAndBounded(t *testing.T) {
 		{name: "missing run id", metas: map[string]string{frpplugin.MetadataRunToken: testRunToken}},
 		{name: "missing token", metas: map[string]string{frpplugin.MetadataRunID: testRunID}},
 		{name: "extra legacy token", metas: map[string]string{frpplugin.MetadataRunID: testRunID, frpplugin.MetadataRunToken: testRunToken, "tunnel_token": "secret"}},
+		{name: "client chosen session", metas: map[string]string{frpplugin.MetadataRunID: testRunID, frpplugin.MetadataRunToken: testRunToken, "nodelane_session_id": testSessionID}},
 		{name: "account access token", metas: map[string]string{frpplugin.MetadataRunID: testRunID, frpplugin.MetadataRunToken: testRunToken, "authorization": "Bearer secret"}},
 		{name: "wrong run namespace", metas: map[string]string{frpplugin.MetadataRunID: "run_aaaaaaaaaaaaaaaaaaaaaaaaaa", frpplugin.MetadataRunToken: testRunToken}},
 		{name: "wrong token namespace", metas: map[string]string{frpplugin.MetadataRunID: testRunID, frpplugin.MetadataRunToken: "nrc_cccccccccccccccccccccccccc.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
@@ -309,8 +323,12 @@ func TestNewProxyRejectsExposureMutations(t *testing.T) {
 			if err != nil || !response.Reject || response.RejectReason != InvalidCredentialReason {
 				t.Fatalf("Dispatch = (%#v, %v), want invalid credential", response, err)
 			}
-			if len(store.proxyCalls) != 1 {
-				t.Fatalf("fresh authorization calls = %d, want 1", len(store.proxyCalls))
+			wantCalls := 1
+			if mutation.name == "user namespace" || mutation.name == "wrong session" {
+				wantCalls = 0
+			}
+			if len(store.proxyCalls) != wantCalls || len(store.registrations) != 0 {
+				t.Fatalf("invalid exposure authorization calls = %d, grants = %d", len(store.proxyCalls), len(store.registrations))
 			}
 		})
 	}
@@ -365,7 +383,11 @@ func TestNewUserConnMatchesFreshAuthorizedAllocation(t *testing.T) {
 			if response.Reject != test.wantErr {
 				t.Fatalf("response = %#v, want rejected=%v", response, test.wantErr)
 			}
-			if len(store.proxyCalls) != 1 || store.proxyCalls[0].proxyName != test.proxyName {
+			if test.name == "wrong session" {
+				if len(store.proxyCalls) != 0 {
+					t.Fatal("invalid session reached store")
+				}
+			} else if len(store.proxyCalls) != 1 || store.proxyCalls[0].proxyName != test.proxyName {
 				t.Fatalf("Authorize calls = %#v", store.proxyCalls)
 			}
 		})
@@ -496,7 +518,7 @@ func testMetas() map[string]string {
 }
 
 func testUser() frpplugin.UserInfo {
-	return frpplugin.UserInfo{Metas: testMetas(), RunID: testRunID}
+	return nativeSessionUser()
 }
 
 func testRun(protocol anonymous.Protocol) anonymous.Run {

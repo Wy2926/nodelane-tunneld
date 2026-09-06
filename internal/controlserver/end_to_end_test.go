@@ -222,6 +222,31 @@ func TestPersistentControlAndStockFRPEndToEnd(t *testing.T) {
 		t.Fatalf("stop did not persist desired state: %v", err)
 	}
 	t.Log("normal Runner stopped within its bound and public HTTP forwarding no longer reaches the backend")
+	recovered := false
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		for _, reconcile := range runtime.reconcileRuns {
+			if err := reconcile(ctx); err != nil {
+				t.Fatalf("reconcile stopped run: %v", err)
+			}
+		}
+		view, err = runtime.postgres.GetRouteView(ctx, account.ID, created.Route.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if view.CurrentRun == nil {
+			recovered = true
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !recovered {
+		t.Fatal("stopped run slot was not released after native registration drain and entry removal")
+	}
+	restarted, err := runtime.postgres.StartAccountRun(ctx, domain.AccountStartCommand{AccountID: account.ID, RouteID: created.Route.ID, IdempotencyKey: "e2e-restart", RequestIP: netip.MustParseAddr("127.0.0.1")})
+	if err != nil || restarted.Run.ID == run.ID {
+		t.Fatalf("same route could not start a new run after recovery: %v", err)
+	}
+	t.Log("confirmed native entry release permits a new run on the same route")
 }
 
 func endToEndListener(t *testing.T) net.Listener {

@@ -1,48 +1,58 @@
-# Complete frps 0.70.0 configuration. Apply it manually after matching
-# auth.token with FRP_AUTH_TOKEN and enabling host networking for frps.
+# Complete stock frps 0.70.0 configuration for a fresh control-plane deployment.
+# Both processes render this same file with matching environment settings.
 
 # frpc control connection. Port 7000 must be a raw TCP route to frps. Do not
 # attach an HTTP/HTTPS health check or a layer-7 reverse proxy to this port.
 bindAddr = "0.0.0.0"
-bindPort = 7000
+bindPort = {{ .Envs.FRP_SERVER_PORT }}
 
 # HTTP tunnel traffic enters here from the public reverse proxy.
 # Keep 8080 private; the wildcard reverse proxy forwards requests to this port
 # and must preserve the original Host header.
 vhostHTTPPort = 8080
-subDomainHost = "tunnel.nodelane.net"
+subDomainHost = "{{ .Envs.PUBLIC_DOMAIN }}"
 
 # Public TCP tunnels use 20000-29999 and UDP tunnels use 30000-39999.
 # frps has one combined allow-list; tunneld allocates the protocol sub-ranges.
 allowPorts = [
-  { start = 20000, end = 39999 }
+  { start = {{ .Envs.TCP_PORT_START }}, end = {{ .Envs.TCP_PORT_END }} },
+  { start = {{ .Envs.UDP_PORT_START }}, end = {{ .Envs.UDP_PORT_END }} }
 ]
 
 # Defense in depth. The product layer also enforces client/IP limits.
 maxPortsPerClient = 1
 detailedErrorsToClient = false
 
-# This token authenticates frpc and must match FRP_AUTH_TOKEN in tunneld .env.
+# Per-run credentials are authorized by the private HTTP plugin, not a shared token.
 auth.method = "token"
-auth.token = "REPLACE_WITH_64_HEX_CHARACTERS"
+auth.token = ""
 auth.additionalScopes = ["HeartBeats", "NewWorkConns"]
 
 # frp control traffic is encrypted independently of the certificate used by
 # the public HTTP reverse proxy.
 transport.tls.force = true
+transport.tls.certFile = "{{ .Envs.FRPS_CERT_FILE }}"
+transport.tls.keyFile = "{{ .Envs.FRPS_KEY_FILE }}"
 transport.tcpMux = true
 transport.tcpMuxKeepaliveInterval = 30
+transport.heartbeatTimeout = 45
+
+# Native current/day counters only. Daily boundaries use UTC; no metrics/history store.
+webServer.addr = "127.0.0.1"
+webServer.port = 7500
+webServer.user = {{ .Envs.FRPS_ADMIN_USERNAME | printf "%q" }}
+webServer.password = {{ .Envs.FRPS_ADMIN_PASSWORD | printf "%q" }}
+enablePrometheus = false
 
 # Container logs remain available through docker logs.
 log.to = "console"
-# Temporarily change to "trace" when diagnosing TLS/yamux handshakes.
-log.level = "info"
+log.level = "warn"
 log.disablePrintColor = true
 
 # frps asks tunneld to authorize connections and proxy lifecycle operations.
 # This endpoint is loopback-only and must never be exposed by a public proxy.
 [[httpPlugins]]
 name = "nodelane-tunnel"
-addr = "127.0.0.1:9000"
+addr = "127.0.0.1:9001"
 path = "/internal/frp"
 ops = ["Login", "NewProxy", "CloseProxy", "Ping", "NewWorkConn", "NewUserConn"]

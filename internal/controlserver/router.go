@@ -26,8 +26,9 @@ type OIDCClientConfig struct {
 }
 
 type ClientConfig struct {
-	FRP  FRPClientConfig  `json:"frp"`
-	OIDC OIDCClientConfig `json:"oidc"`
+	PublicDomain string           `json:"public_domain"`
+	FRP          FRPClientConfig  `json:"frp"`
+	OIDC         OIDCClientConfig `json:"oidc"`
 }
 
 var fallbackPublicRequestID atomic.Uint64

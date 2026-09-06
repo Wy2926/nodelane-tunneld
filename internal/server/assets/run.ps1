@@ -139,12 +139,13 @@ $releaseBase = if ($env:NT_RELEASE_BASE) { $env:NT_RELEASE_BASE.TrimEnd('/') } e
 $dataRoot = Join-Path $localAppData "nodelane\tunnel"
 $versionsDir = Join-Path $dataRoot "versions"
 $currentFile = Join-Path $dataRoot "current"
-$binDir = if ($env:NT_BIN_DIR) { [IO.Path]::GetFullPath($env:NT_BIN_DIR) } else { Join-Path $localAppData "nodelane\bin" }
+$customBin = -not [string]::IsNullOrWhiteSpace($env:NT_BIN_DIR)
+$binDir = if ($customBin) { [IO.Path]::GetFullPath($env:NT_BIN_DIR) } else { Join-Path $localAppData "nodelane\bin" }
 $launcher = Join-Path $binDir "nt.cmd"
 
 Write-Step "Checking the latest NodeLane Tunnel client..."
 $version = Get-RequiredText -Uri "$releaseBase/stable.txt" -Description "release version"
-if ($version -notmatch '^[0-9A-Za-z._-]+$') {
+if ($version -notmatch '^[0-9][0-9A-Za-z._-]{0,63}$') {
     throw "Invalid release version returned by server."
 }
 
@@ -225,11 +226,13 @@ exit /b %ERRORLEVEL%
 '@
 Set-AtomicTextFile -Path $launcher -Value $launcherContent
 
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-$userParts = @($userPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-if (-not ($userParts | Where-Object { $_.TrimEnd('\') -ieq $binDir.TrimEnd('\') })) {
-    [Environment]::SetEnvironmentVariable("Path", ((@($binDir) + $userParts) -join ';'), "User")
-    Write-Step "Added $binDir to the user PATH."
+if (-not $customBin) {
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $userParts = @($userPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if (-not ($userParts | Where-Object { $_.TrimEnd('\') -ieq $binDir.TrimEnd('\') })) {
+        [Environment]::SetEnvironmentVariable("Path", ((@($binDir) + $userParts) -join ';'), "User")
+        Write-Step "Added $binDir to the user PATH."
+    }
 }
 $processParts = @($env:Path -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 if (-not ($processParts | Where-Object { $_.TrimEnd('\') -ieq $binDir.TrimEnd('\') })) {
@@ -248,3 +251,7 @@ Get-ChildItem -LiteralPath $versionsDir -Directory | ForEach-Object {
 }
 
 & $ntExe @TunnelArguments
+$clientExitCode = $LASTEXITCODE
+if ($MyInvocation.MyCommand.Path) {
+    exit $clientExitCode
+}

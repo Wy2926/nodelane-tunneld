@@ -43,6 +43,56 @@ func TestControlMigrationInitializesFreshSchemaAndIsRepeatable(t *testing.T) {
 			t.Errorf("table %s does not exist", table)
 		}
 	}
+	for _, column := range []struct {
+		name       string
+		dataType   string
+		nullable   string
+		defaultSQL string
+	}{
+		{name: "proxy_registration_granted", dataType: "boolean", nullable: "NO", defaultSQL: "false"},
+		{name: "reconciliation_claimed_at", dataType: "timestamp with time zone", nullable: "YES"},
+	} {
+		var dataType, nullable string
+		var defaultSQL sql.NullString
+		if err := fixture.DB.QueryRowContext(ctx, `SELECT data_type,is_nullable,column_default FROM information_schema.columns
+			WHERE table_schema=current_schema() AND table_name='tunnel_runs' AND column_name=$1`, column.name).Scan(&dataType, &nullable, &defaultSQL); err != nil {
+			t.Fatal(err)
+		}
+		if dataType != column.dataType || nullable != column.nullable || defaultSQL.String != column.defaultSQL || defaultSQL.Valid != (column.defaultSQL != "") {
+			t.Fatalf("column %s contract = %s/%s/%#v", column.name, dataType, nullable, defaultSQL)
+		}
+	}
+}
+
+func TestControlMigrationRefusesStaleVersionOneSchemaWithoutChangingRows(t *testing.T) {
+	fixture := newControlTestFixture(t)
+	ctx := context.Background()
+	if err := MigrateControlDatabase(ctx, fixture.DB); err != nil {
+		t.Fatal(err)
+	}
+	account, _ := seedControlAccountRoute(t, fixture.DB)
+	if _, err := fixture.DB.Exec(`ALTER TABLE tunnel_runs
+		DROP COLUMN proxy_registration_granted,
+		DROP COLUMN reconciliation_claimed_at`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MigrateControlDatabase(ctx, fixture.DB); err == nil {
+		t.Fatal("stale version-one schema was accepted")
+	}
+	var subject string
+	if err := fixture.DB.QueryRow(`SELECT identity_subject FROM tunnel_accounts WHERE id=$1`, account.ID).Scan(&subject); err != nil || subject != account.IdentitySubject {
+		t.Fatalf("rejected schema changed rows: subject=%q err=%v", subject, err)
+	}
+	var recoveryColumns int
+	if err := fixture.DB.QueryRow(`SELECT count(*) FROM information_schema.columns
+		WHERE table_schema=current_schema() AND table_name='tunnel_runs'
+		AND column_name IN ('proxy_registration_granted','reconciliation_claimed_at')`).Scan(&recoveryColumns); err != nil {
+		t.Fatal(err)
+	}
+	if recoveryColumns != 0 {
+		t.Fatalf("rejected schema was upgraded: recovery columns=%d", recoveryColumns)
+	}
 }
 
 func TestControlTestGuardRejectsUnsafeEffectiveConfiguration(t *testing.T) {

@@ -120,14 +120,3 @@ func TestRunTargetFormReturnsQuietCancellation(t *testing.T) {
 		t.Fatalf("interactive output is missing the brand: %q", output.String())
 	}
 }
-
-func TestArgumentsNeedPromptWheneverAnyPositionIsMissing(t *testing.T) {
-	for _, args := range [][]string{nil, {"http"}, {"http", "3000"}, {"http", "localhost"}} {
-		if !argumentsNeedPrompt(args) {
-			t.Errorf("argumentsNeedPrompt(%q) = false", args)
-		}
-	}
-	if argumentsNeedPrompt([]string{"http", "localhost", "3000"}) {
-		t.Fatal("complete arguments requested a prompt")
-	}
-}

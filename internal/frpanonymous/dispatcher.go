@@ -33,6 +33,7 @@ var (
 type Store interface {
 	AuthorizeLogin(context.Context, string, string) (anonymous.Run, error)
 	Authorize(context.Context, string, string, string) (anonymous.Run, error)
+	AuthorizeProxyRegistration(context.Context, string, string, string) (anonymous.Run, error)
 }
 
 type Dispatcher struct {
@@ -65,7 +66,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		if request.DecodeContent(&content) != nil {
 			return rejected(InvalidRequestReason), nil
 		}
-		if !directProofMatches(content.PrivilegeKey, content.Metas) {
+		if len(content.Metas) != 2 || !directProofMatches(content.PrivilegeKey, content.Metas) {
 			return rejected(InvalidCredentialReason), nil
 		}
 		run, response, err := d.authorizeLogin(ctx, content.Metas)
@@ -75,8 +76,10 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		if content.User != "" {
 			return rejected(InvalidCredentialReason), nil
 		}
-		content.RunID = run.RunID
-		content.ClientID = run.RunID
+		content, err = frpplugin.BindSession(content, run.RunID)
+		if err != nil {
+			return unavailable()
+		}
 		content.PrivilegeKey = frputil.GetAuthKey("", content.Timestamp)
 		// frps derives User.Metas for every later callback from Login.Metas, so
 		// these credentials must remain in its session state.
@@ -87,7 +90,17 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		if request.DecodeContent(&content) != nil {
 			return rejected(InvalidRequestReason), nil
 		}
+		if !frpplugin.ValidSessionUser(content.User) {
+			return rejected(InvalidCredentialReason), nil
+		}
 		run, response, err := d.authorizeProxy(ctx, content.User.Metas, content.ProxyName)
+		if response.Reject || err != nil {
+			return response, err
+		}
+		if !validNewProxy(content, run) {
+			return rejected(InvalidCredentialReason), nil
+		}
+		run, response, err = d.authorizeProxyUsing(ctx, content.User.Metas, content.ProxyName, d.store.AuthorizeProxyRegistration)
 		if response.Reject || err != nil {
 			return response, err
 		}
@@ -104,7 +117,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		if request.DecodeContent(&content) != nil {
 			return rejected(InvalidRequestReason), nil
 		}
-		if !directProofMatches(content.PrivilegeKey, content.User.Metas) {
+		if !frpplugin.ValidSessionUser(content.User) || !directProofMatches(content.PrivilegeKey, content.User.Metas) {
 			return rejected(InvalidCredentialReason), nil
 		}
 		run, response, err := d.authorizeLogin(ctx, content.User.Metas)
@@ -122,14 +135,14 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		if request.DecodeContent(&content) != nil {
 			return rejected(InvalidRequestReason), nil
 		}
-		if !directProofMatches(content.PrivilegeKey, content.User.Metas) {
+		if !frpplugin.ValidSessionUser(content.User) || content.RunID != content.User.RunID || !directProofMatches(content.PrivilegeKey, content.User.Metas) {
 			return rejected(InvalidCredentialReason), nil
 		}
 		run, response, err := d.authorizeLogin(ctx, content.User.Metas)
 		if response.Reject || err != nil {
 			return response, err
 		}
-		if !validUser(content.User, run) || content.RunID != run.RunID {
+		if !validUser(content.User, run) {
 			return rejected(InvalidCredentialReason), nil
 		}
 		content.PrivilegeKey = frputil.GetAuthKey("", content.Timestamp)
@@ -139,6 +152,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		var content frpplugin.NewUserConnContent
 		if request.DecodeContent(&content) != nil {
 			return rejected(InvalidRequestReason), nil
+		}
+		if !frpplugin.ValidSessionUser(content.User) {
+			return rejected(InvalidCredentialReason), nil
 		}
 		run, response, err := d.authorizeProxy(ctx, content.User.Metas, content.ProxyName)
 		if response.Reject || err != nil {
@@ -153,6 +169,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		var content frpplugin.CloseProxyContent
 		if request.DecodeContent(&content) != nil {
 			return rejected(InvalidRequestReason), nil
+		}
+		if !frpplugin.ValidSessionUser(content.User) {
+			return rejected(InvalidCredentialReason), nil
 		}
 		run, response, err := d.authorizeProxy(ctx, content.User.Metas, content.ProxyName)
 		if response.Reject || err != nil {
@@ -195,11 +214,15 @@ func (d *Dispatcher) authorizeLogin(ctx context.Context, metas map[string]string
 }
 
 func (d *Dispatcher) authorizeProxy(ctx context.Context, metas map[string]string, proxyName string) (anonymous.Run, frpplugin.Response, error) {
+	return d.authorizeProxyUsing(ctx, metas, proxyName, d.store.Authorize)
+}
+
+func (d *Dispatcher) authorizeProxyUsing(ctx context.Context, metas map[string]string, proxyName string, lookup func(context.Context, string, string, string) (anonymous.Run, error)) (anonymous.Run, frpplugin.Response, error) {
 	runID, token, ok := runProof(metas)
 	if !ok || !validIdentifier(proxyName, "anon_") {
 		return anonymous.Run{}, rejected(InvalidCredentialReason), nil
 	}
-	run, err := d.store.Authorize(ctx, runID, token, proxyName)
+	run, err := lookup(ctx, runID, token, proxyName)
 	if err != nil {
 		response, mapped := authorizationError(err)
 		return anonymous.Run{}, response, mapped
@@ -226,7 +249,7 @@ func authorizationError(err error) (frpplugin.Response, error) {
 }
 
 func runProof(metas map[string]string) (string, string, bool) {
-	if len(metas) != 2 {
+	if len(metas) != 2 && (len(metas) != 3 || !frpplugin.ValidSessionID(metas[frpplugin.MetadataSessionID])) {
 		return "", "", false
 	}
 	runID, hasRunID := metas[frpplugin.MetadataRunID]
@@ -256,7 +279,7 @@ func validRun(runID string, run anonymous.Run) bool {
 }
 
 func validUser(user frpplugin.UserInfo, run anonymous.Run) bool {
-	return user.User == "" && user.RunID == run.RunID
+	return frpplugin.ValidSessionUser(user) && user.Metas[frpplugin.MetadataRunID] == run.RunID
 }
 
 func validNewProxy(content frpplugin.NewProxyContent, run anonymous.Run) bool {

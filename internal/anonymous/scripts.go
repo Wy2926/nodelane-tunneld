@@ -23,6 +23,49 @@ end
 return {1, run_id, revision, generation}
 `)
 
+var prepareFreshInitializationScript = redis.NewScript(`
+local info = redis.call('INFO', 'server')
+local run_id = string.match(info, 'run_id:([0-9a-f]+)')
+if not run_id then return {-1, '', '', '0'} end
+local marker_type = redis.call('TYPE', KEYS[1]).ok
+if marker_type ~= 'none' and marker_type ~= 'hash' then return {-2, run_id, '', '0'} end
+local generation = '0'
+if marker_type == 'hash' then
+  local revision = redis.call('HGET', KEYS[1], 'revision') or ''
+  local owner_hash = redis.call('HGET', KEYS[1], 'owner_hash') or ''
+  local state = redis.call('HGET', KEYS[1], 'state') or ''
+  generation = redis.call('HGET', KEYS[1], 'generation') or ''
+  if revision ~= '' or owner_hash ~= '' or state ~= 'blocked' or not string.match(generation, '^%d+$') then
+    return {-2, run_id, revision, generation}
+  end
+end
+redis.call('HSET', KEYS[1], 'node_run_id', run_id, 'state', 'blocked')
+generation = redis.call('HINCRBY', KEYS[1], 'generation', 1)
+return {1, run_id, '', generation}
+`)
+
+var assertFreshNamespaceFenceScript = redis.NewScript(`
+local info = redis.call('INFO', 'server')
+local run_id = string.match(info, 'run_id:([0-9a-f]+)')
+if not run_id or run_id ~= ARGV[1] then return {-1} end
+if ARGV[2] ~= '' then return {-2} end
+local marker_type = redis.call('TYPE', KEYS[1]).ok
+if marker_type == 'none' then
+  if ARGV[3] ~= '0' then return {-2} end
+  return {1}
+end
+if marker_type ~= 'hash' then return {-2} end
+local revision = redis.call('HGET', KEYS[1], 'revision') or ''
+local owner_hash = redis.call('HGET', KEYS[1], 'owner_hash') or ''
+local node_run_id = redis.call('HGET', KEYS[1], 'node_run_id') or ''
+local generation = redis.call('HGET', KEYS[1], 'generation') or ''
+local state = redis.call('HGET', KEYS[1], 'state') or ''
+if revision ~= '' or owner_hash ~= '' or node_run_id ~= run_id or generation ~= ARGV[3] or state ~= 'blocked' then
+  return {-2}
+end
+return {1}
+`)
+
 var markResourcesVerifiedScript = redis.NewScript(`
 local info = redis.call('INFO', 'server')
 local run_id = string.match(info, 'run_id:([0-9a-f]+)')
@@ -247,6 +290,7 @@ redis.call('HSET', KEYS[8],
   'state', 'reserved',
   'desired_state', 'running',
 	'ever_connected', '0',
+  'proxy_registration_granted', '0',
   'created_at', ARGV[20],
   'connect_deadline_at', ARGV[2],
   'lease_expires_at', '0',
@@ -307,6 +351,10 @@ local state = redis.call('HGET', KEYS[1], 'state')
 if state ~= 'reserved' and state ~= 'online' and state ~= 'stopping' and state ~= 'verifying' and state ~= 'released' then
   return {-6}
 end
+local registration_granted = redis.call('HGET', KEYS[1], 'proxy_registration_granted')
+if registration_granted ~= '0' and registration_granted ~= '1' then
+  return {-6}
+end
 local installation_key = redis.call('HGET', KEYS[1], 'installation_active_key')
 local network_key = redis.call('HGET', KEYS[1], 'network_active_key')
 if state ~= 'released' then
@@ -359,8 +407,12 @@ elseif action == 'heartbeat' then
     redis.call('ZADD', KEYS[2], lease_expires, KEYS[1])
     redis.call('ZADD', installation_key, lease_expires, ARGV[6])
     redis.call('ZADD', network_key, lease_expires, ARGV[6])
-  elseif state ~= 'reserved' then
-    return {-3}
+	elseif state ~= 'reserved' then
+		return {-3}
+	end
+elseif action == 'authorize_proxy_registration' then
+  if registration_granted == '0' then
+    redis.call('HSET', KEYS[1], 'proxy_registration_granted', '1')
   end
 elseif action ~= 'authorize' then
   return {-3}
@@ -376,7 +428,8 @@ return {1,
   redis.call('HGET', KEYS[1], 'created_at'),
   redis.call('HGET', KEYS[1], 'connect_deadline_at'),
   redis.call('HGET', KEYS[1], 'lease_expires_at'),
-  redis.call('HGET', KEYS[1], 'hard_expires_at')}
+  redis.call('HGET', KEYS[1], 'hard_expires_at'),
+  redis.call('HGET', KEYS[1], 'proxy_registration_granted') or ''}
 `)
 
 var markConnectedScript = redis.NewScript(`
@@ -418,6 +471,10 @@ if not hard_expires or now >= hard_expires then
   redis.call('ZADD', network_key, now, ARGV[2])
   return {-4}
 end
+local registration_granted = redis.call('HGET', KEYS[1], 'proxy_registration_granted')
+if registration_granted ~= '0' and registration_granted ~= '1' then
+  return {-2}
+end
 if state == 'reserved' then
   local connect_deadline = tonumber(redis.call('HGET', KEYS[1], 'connect_deadline_at'))
   if not connect_deadline or now >= connect_deadline then
@@ -429,6 +486,7 @@ if state == 'reserved' then
   end
   local lease_expires = now + tonumber(ARGV[4])
   if lease_expires > hard_expires then lease_expires = hard_expires end
+  if registration_granted == '0' then redis.call('HSET', KEYS[1], 'proxy_registration_granted', '1') end
   redis.call('HSET', KEYS[1], 'state', 'online', 'lease_expires_at', lease_expires, 'ever_connected', '1')
   redis.call('ZADD', KEYS[2], lease_expires, KEYS[1])
   redis.call('ZADD', installation_key, lease_expires, ARGV[2])
@@ -442,6 +500,7 @@ elseif state == 'online' then
     redis.call('ZADD', network_key, now, ARGV[2])
     return {-4}
   end
+  if registration_granted == '0' then redis.call('HSET', KEYS[1], 'proxy_registration_granted', '1') end
 else
   return {-3}
 end
@@ -455,7 +514,8 @@ return {1,
   redis.call('HGET', KEYS[1], 'created_at'),
   redis.call('HGET', KEYS[1], 'connect_deadline_at'),
   redis.call('HGET', KEYS[1], 'lease_expires_at'),
-  redis.call('HGET', KEYS[1], 'hard_expires_at')}
+  redis.call('HGET', KEYS[1], 'hard_expires_at'),
+  redis.call('HGET', KEYS[1], 'proxy_registration_granted') or ''}
 `)
 
 var confirmReleasedScript = redis.NewScript(`
@@ -463,9 +523,13 @@ local now = tonumber(ARGV[1])
 if redis.call('EXISTS', KEYS[1]) == 0 then
   return {-1}
 end
-if redis.call('HGET', KEYS[1], 'run_id') ~= ARGV[2] or redis.call('HGET', KEYS[1], 'proxy_name') ~= ARGV[3] then
+if redis.call('HGET', KEYS[1], 'run_id') ~= ARGV[2] then
   return {-2}
 end
+local stored_proxy_name = redis.call('HGET', KEYS[1], 'proxy_name')
+if not stored_proxy_name or (ARGV[10] ~= 'release_never_granted' and stored_proxy_name ~= ARGV[3]) then return {-2} end
+local registration_granted = redis.call('HGET', KEYS[1], 'proxy_registration_granted')
+if registration_granted ~= '0' and registration_granted ~= '1' then return {-4} end
 local state = redis.call('HGET', KEYS[1], 'state')
 local desired_state = redis.call('HGET', KEYS[1], 'desired_state')
 if state == 'reserved' or state == 'online' then
@@ -475,6 +539,9 @@ elseif state == 'stopping' or state == 'verifying' or state == 'released' then
 else
   return {-3}
 end
+if ARGV[10] == 'release_never_granted' and registration_granted ~= '0' then return {-5} end
+if ARGV[10] == 'never_registered' and registration_granted ~= '0' then return {-5} end
+if ARGV[10] == 'drained_absent_proxy' and registration_granted ~= '1' then return {-5} end
 if state == 'released' then
   return {1}
 end
@@ -483,7 +550,7 @@ if ARGV[10] == 'never_registered' then
   if redis.call('HGET', KEYS[1], 'ever_connected') ~= '0' or not connect_deadline or now < connect_deadline then
     return {-5}
   end
-elseif ARGV[10] ~= 'offline_sample' then
+elseif ARGV[10] ~= 'offline_sample' and ARGV[10] ~= 'drained_absent_proxy' and ARGV[10] ~= 'release_never_granted' then
   return {-5}
 end
 local hard_expires = tonumber(redis.call('HGET', KEYS[1], 'hard_expires_at'))

@@ -1,18 +1,6 @@
+# Registry-only override: use with -f compose.yaml -f compose.registry.yaml.
 services:
   tunneld:
+    build: !reset null
     image: ${TUNNELD_IMAGE:?Set TUNNELD_IMAGE to an OCI image reference}
     pull_policy: always
-    restart: unless-stopped
-    init: true
-    read_only: true
-    network_mode: host
-    env_file:
-      - ../.env
-    security_opt:
-      - no-new-privileges:true
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "5"
-    stop_grace_period: 15s

@@ -28,6 +28,7 @@ var (
 
 type Repository interface {
 	AuthorizeRun(context.Context, domain.RunProof) (domain.RunAuthorization, error)
+	AuthorizeProxyRegistration(context.Context, domain.RunProof) (domain.RunAuthorization, error)
 }
 
 type Authorizer struct {
@@ -61,7 +62,7 @@ func nilRepository(repository Repository) bool {
 }
 
 func (a *Authorizer) Login(ctx context.Context, content frpplugin.LoginContent) (frpplugin.LoginContent, domain.RunAuthorization, error) {
-	if !directProofMatches(content.PrivilegeKey, content.Metas) {
+	if len(content.Metas) != 2 || !directProofMatches(content.PrivilegeKey, content.Metas) {
 		return frpplugin.LoginContent{}, domain.RunAuthorization{}, ErrInvalidCredential
 	}
 	authorization, err := a.authorize(ctx, content.Metas)
@@ -71,13 +72,25 @@ func (a *Authorizer) Login(ctx context.Context, content frpplugin.LoginContent) 
 	if content.User != "" {
 		return frpplugin.LoginContent{}, domain.RunAuthorization{}, ErrInvalidCredential
 	}
-	content.RunID = authorization.Run.ID
-	content.ClientID = authorization.Run.ID
+	content, err = frpplugin.BindSession(content, authorization.Run.ID)
+	if err != nil {
+		return frpplugin.LoginContent{}, domain.RunAuthorization{}, ErrDependencyUnavailable
+	}
 	return content, authorization, nil
 }
 
 func (a *Authorizer) NewProxy(ctx context.Context, content frpplugin.NewProxyContent) (frpplugin.NewProxyContent, domain.RunAuthorization, error) {
+	if !frpplugin.ValidSessionUser(content.User) {
+		return frpplugin.NewProxyContent{}, domain.RunAuthorization{}, ErrInvalidCredential
+	}
 	authorization, err := a.authorize(ctx, content.User.Metas)
+	if err != nil {
+		return frpplugin.NewProxyContent{}, domain.RunAuthorization{}, err
+	}
+	if !validNewProxy(content, authorization.Route) {
+		return frpplugin.NewProxyContent{}, domain.RunAuthorization{}, ErrInvalidCredential
+	}
+	authorization, err = a.authorizeUsing(ctx, content.User.Metas, a.repository.AuthorizeProxyRegistration)
 	if err != nil {
 		return frpplugin.NewProxyContent{}, domain.RunAuthorization{}, err
 	}
@@ -92,29 +105,23 @@ func (a *Authorizer) NewProxy(ctx context.Context, content frpplugin.NewProxyCon
 }
 
 func (a *Authorizer) Ping(ctx context.Context, content frpplugin.PingContent) (domain.RunAuthorization, error) {
-	if !directProofMatches(content.PrivilegeKey, content.User.Metas) {
+	if !frpplugin.ValidSessionUser(content.User) || !directProofMatches(content.PrivilegeKey, content.User.Metas) {
 		return domain.RunAuthorization{}, ErrInvalidCredential
 	}
 	authorization, err := a.authorize(ctx, content.User.Metas)
 	if err != nil {
 		return domain.RunAuthorization{}, err
-	}
-	if content.User.User != "" || content.User.RunID != authorization.Run.ID {
-		return domain.RunAuthorization{}, ErrInvalidCredential
 	}
 	return authorization, nil
 }
 
 func (a *Authorizer) NewWorkConn(ctx context.Context, content frpplugin.NewWorkConnContent) (domain.RunAuthorization, error) {
-	if !directProofMatches(content.PrivilegeKey, content.User.Metas) {
+	if !frpplugin.ValidSessionUser(content.User) || content.RunID != content.User.RunID || !directProofMatches(content.PrivilegeKey, content.User.Metas) {
 		return domain.RunAuthorization{}, ErrInvalidCredential
 	}
 	authorization, err := a.authorize(ctx, content.User.Metas)
 	if err != nil {
 		return domain.RunAuthorization{}, err
-	}
-	if content.User.User != "" || content.RunID != authorization.Run.ID || content.User.RunID != authorization.Run.ID {
-		return domain.RunAuthorization{}, ErrInvalidCredential
 	}
 	return authorization, nil
 }
@@ -127,6 +134,9 @@ func directProofMatches(token string, metas map[string]string) bool {
 }
 
 func (a *Authorizer) NewUserConn(ctx context.Context, content frpplugin.NewUserConnContent) (domain.RunAuthorization, error) {
+	if !frpplugin.ValidSessionUser(content.User) {
+		return domain.RunAuthorization{}, ErrInvalidCredential
+	}
 	authorization, err := a.authorize(ctx, content.User.Metas)
 	if err != nil {
 		return domain.RunAuthorization{}, err
@@ -137,12 +147,30 @@ func (a *Authorizer) NewUserConn(ctx context.Context, content frpplugin.NewUserC
 	return authorization, nil
 }
 
+func (a *Authorizer) CloseProxy(ctx context.Context, content frpplugin.CloseProxyContent) (domain.RunAuthorization, error) {
+	if !frpplugin.ValidSessionUser(content.User) {
+		return domain.RunAuthorization{}, ErrInvalidCredential
+	}
+	authorization, err := a.authorize(ctx, content.User.Metas)
+	if err != nil {
+		return domain.RunAuthorization{}, err
+	}
+	if content.ProxyName != authorization.Route.ProxyName {
+		return domain.RunAuthorization{}, ErrInvalidCredential
+	}
+	return authorization, nil
+}
+
 func (a *Authorizer) authorize(ctx context.Context, metas map[string]string) (domain.RunAuthorization, error) {
+	return a.authorizeUsing(ctx, metas, a.repository.AuthorizeRun)
+}
+
+func (a *Authorizer) authorizeUsing(ctx context.Context, metas map[string]string, lookup func(context.Context, domain.RunProof) (domain.RunAuthorization, error)) (domain.RunAuthorization, error) {
 	proof, ok := runProof(metas)
 	if !ok {
 		return domain.RunAuthorization{}, ErrInvalidCredential
 	}
-	authorization, err := a.repository.AuthorizeRun(ctx, proof)
+	authorization, err := lookup(ctx, proof)
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrInvalidRunProof):
@@ -160,7 +188,7 @@ func (a *Authorizer) authorize(ctx context.Context, metas map[string]string) (do
 }
 
 func runProof(metas map[string]string) (domain.RunProof, bool) {
-	if len(metas) != 2 {
+	if len(metas) != 2 && (len(metas) != 3 || !frpplugin.ValidSessionID(metas[frpplugin.MetadataSessionID])) {
 		return domain.RunProof{}, false
 	}
 	runID, hasRunID := metas[MetadataRunID]

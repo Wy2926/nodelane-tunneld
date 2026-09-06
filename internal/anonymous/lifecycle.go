@@ -33,6 +33,20 @@ func (s *Store) Authorize(ctx context.Context, runID, credentialToken, proxyName
 	return run, mapRunOperationCode(code)
 }
 
+func (s *Store) AuthorizeProxyRegistration(ctx context.Context, runID, credentialToken, proxyName string) (Run, error) {
+	if !validRandomIdentifier(proxyName, "anon_", 16) {
+		return Run{}, ErrInvalidCredential
+	}
+	run, code, err := s.runOperation(ctx, "authorize_proxy_registration", runID, credentialToken, proxyName)
+	if err != nil {
+		return Run{}, err
+	}
+	if code == -4 {
+		return Run{}, ErrRunExpired
+	}
+	return run, mapRunOperationCode(code)
+}
+
 func (s *Store) Heartbeat(ctx context.Context, runID, credentialToken string) (HeartbeatResult, error) {
 	run, code, err := s.runOperation(ctx, "heartbeat", runID, credentialToken, "")
 	if err != nil {
@@ -147,10 +161,10 @@ func mapRunOperationCode(code int64) error {
 }
 
 func decodeRun(values []any) (Run, error) {
-	if len(values) != 11 {
+	if len(values) != 12 {
 		return Run{}, ErrInvalidState
 	}
-	strings := make([]string, 10)
+	strings := make([]string, 11)
 	for index := 1; index < len(values); index++ {
 		value, ok := asString(values[index])
 		if !ok {
@@ -179,6 +193,13 @@ func decodeRun(values []any) (Run, error) {
 		State: State(strings[4]), DesiredState: DesiredState(strings[5]), CreatedAt: time.UnixMilli(createdAt).UTC(),
 		ConnectDeadlineAt: time.UnixMilli(connectDeadline).UTC(), HardExpiresAt: time.UnixMilli(hardExpires).UTC(),
 	}
+	switch strings[10] {
+	case "0":
+	case "1":
+		run.ProxyRegistrationGranted = true
+	default:
+		return Run{}, ErrInvalidState
+	}
 	if leaseExpires != 0 {
 		run.LeaseExpiresAt = time.UnixMilli(leaseExpires).UTC()
 	}
@@ -199,11 +220,15 @@ func (s *Store) ConfirmReleased(ctx context.Context, evidence ReleaseEvidence) e
 	}
 	switch evidence.Kind {
 	case ReleaseEvidenceOfflineSample:
-		if !evidence.ObservedOffline || !evidence.SampleAvailable || evidence.CurrentConnections != 0 || evidence.ConfirmedNeverRegistered {
+		if !evidence.ObservedOffline || evidence.ProxyNotObserved || !evidence.SampleAvailable || evidence.CurrentConnections != 0 || evidence.ConfirmedNeverRegistered || evidence.ConfirmedClientDisconnected {
 			return ErrReleaseUnconfirmed
 		}
 	case ReleaseEvidenceNeverRegistered:
-		if !evidence.ConfirmedNeverRegistered || evidence.ObservedOffline || evidence.SampleAvailable || evidence.CurrentConnections != 0 {
+		if !evidence.ConfirmedNeverRegistered || evidence.ObservedOffline || evidence.ProxyNotObserved || evidence.SampleAvailable || evidence.CurrentConnections != 0 || evidence.ConfirmedClientDisconnected {
+			return ErrReleaseUnconfirmed
+		}
+	case ReleaseEvidenceDrainedAbsentProxy:
+		if evidence.ConfirmedNeverRegistered || evidence.ObservedOffline || !evidence.ProxyNotObserved || evidence.SampleAvailable || evidence.CurrentConnections != 0 || !evidence.ConfirmedClientDisconnected {
 			return ErrReleaseUnconfirmed
 		}
 	default:
@@ -237,6 +262,39 @@ func (s *Store) ConfirmReleased(ctx context.Context, evidence ReleaseEvidence) e
 	case -3:
 		return ErrInvalidState
 	case -4:
+		return ErrInvalidState
+	case -5:
+		return ErrReleaseUnconfirmed
+	default:
+		return ErrUnavailable
+	}
+}
+
+func (s *Store) ReleaseNeverGranted(ctx context.Context, runID string) error {
+	if !validRandomIdentifier(runID, "anr_", 16) {
+		return ErrInvalidRequest
+	}
+	now, err := s.now()
+	if err != nil {
+		return err
+	}
+	values, err := confirmReleasedScript.Run(ctx, s.client, []string{s.runKey(runID), s.verificationKey()},
+		now.UnixMilli(), runID, "", replayLifetime.Milliseconds(),
+		s.prefix+":resource:", s.prefix+":proxy:", s.prefix+":active:installation:",
+		s.prefix+":active:network:", s.prefix+":replay:", "release_never_granted").Slice()
+	if err != nil || len(values) != 1 {
+		return ErrUnavailable
+	}
+	code, ok := parseInt64(values[0])
+	if !ok {
+		return ErrUnavailable
+	}
+	switch code {
+	case 1:
+		return nil
+	case -1:
+		return ErrRunNotFound
+	case -2, -3, -4:
 		return ErrInvalidState
 	case -5:
 		return ErrReleaseUnconfirmed
@@ -362,7 +420,7 @@ func (s *Store) inspectVerificationItem(ctx context.Context, runKey string, dueA
 	}
 	return VerificationItem{
 		RunID: run.RunID, ProxyName: run.ProxyName, PublicEndpoint: run.PublicEndpoint,
-		Protocol: run.Protocol, DueAt: time.UnixMilli(dueAtMS).UTC(),
+		Protocol: run.Protocol, DueAt: time.UnixMilli(dueAtMS).UTC(), ProxyRegistrationGranted: run.ProxyRegistrationGranted,
 	}, "", nil
 }
 
@@ -384,7 +442,7 @@ func decodeRunFields(fields map[string]string) (Run, error) {
 	return decodeRun([]any{
 		int64(1), fields["run_id"], fields["proxy_name"], fields["public_endpoint"], fields["protocol"],
 		fields["state"], fields["desired_state"], fields["created_at"], fields["connect_deadline_at"],
-		fields["lease_expires_at"], fields["hard_expires_at"],
+		fields["lease_expires_at"], fields["hard_expires_at"], fields["proxy_registration_granted"],
 	})
 }
 

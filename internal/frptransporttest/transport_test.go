@@ -59,11 +59,16 @@ func (r repository) AuthorizeRun(_ context.Context, proof domain.RunProof) (doma
 	}, nil
 }
 
+func (r repository) AuthorizeProxyRegistration(ctx context.Context, proof domain.RunProof) (domain.RunAuthorization, error) {
+	return r.AuthorizeRun(ctx, proof)
+}
+
 type recordingDispatcher struct {
 	inner        *frpregistered.Dispatcher
 	mu           sync.Mutex
 	ops          map[frpplugin.Operation]int
 	rejectedWork int
+	sessions     []string
 }
 
 func (d *recordingDispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (frpplugin.Response, error) {
@@ -71,12 +76,29 @@ func (d *recordingDispatcher) Dispatch(ctx context.Context, request frpplugin.Re
 	d.ops[request.Op]++
 	d.mu.Unlock()
 	response, err := d.inner.Dispatch(ctx, request)
+	if request.Op == frpplugin.OpLogin && err == nil && !response.Reject {
+		content, ok := response.Content.(frpplugin.LoginContent)
+		if ok {
+			d.mu.Lock()
+			d.sessions = append(d.sessions, content.RunID)
+			d.mu.Unlock()
+		}
+	}
 	if request.Op == frpplugin.OpNewWorkConn && response.Reject {
 		d.mu.Lock()
 		d.rejectedWork++
 		d.mu.Unlock()
 	}
 	return response, err
+}
+
+func (d *recordingDispatcher) latestSessionID() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.sessions) == 0 {
+		return ""
+	}
+	return d.sessions[len(d.sessions)-1]
 }
 
 func (d *recordingDispatcher) rejectedWorkCount() int {
@@ -313,7 +335,7 @@ func rejectUnprovedWorkConnections(t *testing.T, port int, ca, protocol string, 
 			}
 			before := recorder.rejectedWorkCount()
 			messages := msg.NewReadWriter(connection, protocol)
-			if err := messages.WriteMsg(&msg.NewWorkConn{RunID: runID, PrivilegeKey: proof}); err != nil {
+			if err := messages.WriteMsg(&msg.NewWorkConn{RunID: recorder.latestSessionID(), PrivilegeKey: proof}); err != nil {
 				t.Fatal(err)
 			}
 			var response msg.StartWorkConn

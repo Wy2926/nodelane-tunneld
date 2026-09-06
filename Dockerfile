@@ -20,7 +20,14 @@ RUN apk add --no-cache tar zip
 COPY client-version.txt ./
 COPY deploy/build-client-assets.sh ./deploy/build-client-assets.sh
 COPY cmd/nt ./cmd/nt
+COPY internal/cliauth ./internal/cliauth
 COPY internal/client ./internal/client
+COPY internal/domain ./internal/domain
+COPY internal/frpplugin ./internal/frpplugin
+COPY internal/identity ./internal/identity
+COPY internal/routes ./internal/routes
+COPY internal/runclient ./internal/runclient
+COPY internal/runsecret ./internal/runsecret
 RUN sed -i 's/\r$//' ./deploy/build-client-assets.sh && \
     nt_version="$NT_VERSION" && \
     if [ -z "$nt_version" ]; then nt_version="$(tr -d '\r\n' < client-version.txt)"; fi && \

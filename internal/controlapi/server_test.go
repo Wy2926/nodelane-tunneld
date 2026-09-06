@@ -580,7 +580,7 @@ func TestSuccessfulResponsesUseExplicitSecretSafeDTOs(t *testing.T) {
 			t.Fatalf("list leaked internal field %q: %s", forbidden, body)
 		}
 	}
-	if !strings.Contains(body, `"public_url":"https://example.tunnel.example.test"`) || !strings.Contains(body, `"current_run"`) {
+	if !strings.Contains(body, `"public_url":"http://example.tunnel.example.test"`) || !strings.Contains(body, `"current_run"`) {
 		t.Fatalf("list omitted public projection: %s", body)
 	}
 

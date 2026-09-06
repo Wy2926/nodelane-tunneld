@@ -31,6 +31,7 @@ type Authorizer interface {
 	Ping(context.Context, frpplugin.PingContent) (domain.RunAuthorization, error)
 	NewWorkConn(context.Context, frpplugin.NewWorkConnContent) (domain.RunAuthorization, error)
 	NewUserConn(context.Context, frpplugin.NewUserConnContent) (domain.RunAuthorization, error)
+	CloseProxy(context.Context, frpplugin.CloseProxyContent) (domain.RunAuthorization, error)
 }
 
 type Dispatcher struct {
@@ -117,6 +118,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, request frpplugin.Request) (f
 		}
 		// CloseProxy is only a notification. The control plane waits for
 		// trusted native data-plane evidence before marking a run offline.
+		if _, err := d.authorizer.CloseProxy(ctx, content); err != nil {
+			return authorizationError(err)
+		}
 		return unchanged(), nil
 
 	default:

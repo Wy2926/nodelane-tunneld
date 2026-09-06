@@ -54,6 +54,13 @@ version=$(curl -fsSL "$release_base/stable.txt")
 case "$version" in
   *[!0-9A-Za-z._-]*|'') fail "Invalid release version returned by server." 4 ;;
 esac
+case "$version" in
+  [0-9]*) ;;
+  *) fail "Invalid release version returned by server." 4 ;;
+esac
+if [ "${#version}" -gt 64 ]; then
+  fail "Invalid release version returned by server." 4
+fi
 
 asset="nt_${version}_${os}_${arch}.tar.gz"
 install_dir="$versions_dir/$version/$os-$arch"

@@ -97,6 +97,8 @@ CREATE TABLE tunnel_runs (
     connect_deadline_at TIMESTAMPTZ NOT NULL CHECK (connect_deadline_at > created_at),
     lease_expires_at TIMESTAMPTZ NULL CHECK (lease_expires_at IS NULL OR lease_expires_at > created_at),
     stop_reason TEXT NULL,
+    proxy_registration_granted BOOLEAN NOT NULL DEFAULT FALSE,
+    reconciliation_claimed_at TIMESTAMPTZ NULL,
     CHECK (connected_at IS NOT NULL OR connected_ip IS NULL),
     CHECK (status <> 'online' OR (connected_at IS NOT NULL AND connected_ip IS NOT NULL AND lease_expires_at IS NOT NULL)),
     CHECK (status <> 'offline' OR stopped_at IS NOT NULL),

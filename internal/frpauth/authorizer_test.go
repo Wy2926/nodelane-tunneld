@@ -21,9 +21,16 @@ const (
 )
 
 type recordingRepository struct {
-	authorization domain.RunAuthorization
-	err           error
-	proofs        []domain.RunProof
+	authorization   domain.RunAuthorization
+	err             error
+	proofs          []domain.RunProof
+	registrations   []domain.RunProof
+	registrationErr error
+}
+
+func (r *recordingRepository) AuthorizeProxyRegistration(_ context.Context, proof domain.RunProof) (domain.RunAuthorization, error) {
+	r.registrations = append(r.registrations, proof)
+	return r.authorization, r.registrationErr
 }
 
 func (r *recordingRepository) AuthorizeRun(_ context.Context, proof domain.RunProof) (domain.RunAuthorization, error) {
@@ -60,8 +67,8 @@ func TestWorkConnectionCannotUseInheritedMetadataAsCallerProof(t *testing.T) {
 	authorizer := newTestAuthorizer(t, repository)
 	const timestamp = int64(1788652800)
 	content := frpplugin.NewWorkConnContent{
-		User:  frpplugin.UserInfo{RunID: testRunID, Metas: testMetas()},
-		RunID: testRunID, Timestamp: timestamp, PrivilegeKey: frputil.GetAuthKey("", timestamp),
+		User:  sessionUser(),
+		RunID: testSessionID, Timestamp: timestamp, PrivilegeKey: frputil.GetAuthKey("", timestamp),
 	}
 	if _, err := authorizer.NewWorkConn(context.Background(), content); err == nil {
 		t.Fatal("work connection without its own run credential was authorized from inherited session metadata")
@@ -79,9 +86,9 @@ func TestConnectionCallbacksRequireTheirOwnExactRunCredential(t *testing.T) {
 				case "Login":
 					_, _, err = authorizer.Login(context.Background(), frpplugin.LoginContent{Metas: testMetas(), PrivilegeKey: token})
 				case "Ping":
-					_, err = authorizer.Ping(context.Background(), frpplugin.PingContent{User: frpplugin.UserInfo{Metas: testMetas(), RunID: testRunID}, PrivilegeKey: token})
+					_, err = authorizer.Ping(context.Background(), frpplugin.PingContent{User: sessionUser(), PrivilegeKey: token})
 				case "NewWorkConn":
-					_, err = authorizer.NewWorkConn(context.Background(), frpplugin.NewWorkConnContent{User: frpplugin.UserInfo{Metas: testMetas(), RunID: testRunID}, RunID: testRunID, PrivilegeKey: token})
+					_, err = authorizer.NewWorkConn(context.Background(), frpplugin.NewWorkConnContent{User: sessionUser(), RunID: testSessionID, PrivilegeKey: token})
 				}
 				if !errors.Is(err, ErrInvalidCredential) || len(repository.proofs) != 0 {
 					t.Fatalf("missing or mixed caller proof reached authorization: err=%v calls=%d", err, len(repository.proofs))
@@ -93,10 +100,12 @@ func TestConnectionCallbacksRequireTheirOwnExactRunCredential(t *testing.T) {
 
 func TestWorkConnectionDirectProofCannotCrossRunIdentities(t *testing.T) {
 	for _, test := range []struct{ session, connection string }{
-		{"", testRunID}, {testRunID, ""}, {testRunID, "run_dddddddddddddddddddddddddd"}, {"run_dddddddddddddddddddddddddd", testRunID},
+		{"", testSessionID}, {testSessionID, ""}, {testSessionID, "fcs_eeeeeeeeeeeeeeeeeeeeeeeeee"}, {"fcs_eeeeeeeeeeeeeeeeeeeeeeeeee", testSessionID},
 	} {
 		authorizer := newTestAuthorizer(t, &recordingRepository{authorization: testAuthorization()})
-		_, err := authorizer.NewWorkConn(context.Background(), frpplugin.NewWorkConnContent{User: frpplugin.UserInfo{RunID: test.session, Metas: testMetas()}, RunID: test.connection, PrivilegeKey: testRunToken})
+		user := sessionUser()
+		user.RunID = test.session
+		_, err := authorizer.NewWorkConn(context.Background(), frpplugin.NewWorkConnContent{User: user, RunID: test.connection, PrivilegeKey: testRunToken})
 		if !errors.Is(err, ErrInvalidCredential) {
 			t.Fatalf("cross-run work connection accepted: %v", err)
 		}
@@ -116,22 +125,26 @@ func TestEveryRegisteredCallbackReauthorizesItsRunProof(t *testing.T) {
 		}},
 		{"NewProxy", func() error {
 			_, _, err := authorizer.NewProxy(context.Background(), frpplugin.NewProxyContent{
-				User: frpplugin.UserInfo{Metas: testMetas()}, ProxyName: testRouteID, ProxyType: "http", Subdomain: "demo",
+				User: sessionUser(), ProxyName: testRouteID, ProxyType: "http", Subdomain: "demo",
 			})
 			return err
 		}},
 		{"Ping", func() error {
-			_, err := authorizer.Ping(context.Background(), frpplugin.PingContent{User: frpplugin.UserInfo{Metas: testMetas(), RunID: testRunID}, PrivilegeKey: testRunToken})
+			_, err := authorizer.Ping(context.Background(), frpplugin.PingContent{User: sessionUser(), PrivilegeKey: testRunToken})
 			return err
 		}},
 		{"NewWorkConn", func() error {
-			_, err := authorizer.NewWorkConn(context.Background(), frpplugin.NewWorkConnContent{User: frpplugin.UserInfo{Metas: testMetas(), RunID: testRunID}, RunID: testRunID, PrivilegeKey: testRunToken})
+			_, err := authorizer.NewWorkConn(context.Background(), frpplugin.NewWorkConnContent{User: sessionUser(), RunID: testSessionID, PrivilegeKey: testRunToken})
 			return err
 		}},
 		{"NewUserConn", func() error {
 			_, err := authorizer.NewUserConn(context.Background(), frpplugin.NewUserConnContent{
-				User: frpplugin.UserInfo{Metas: testMetas()}, ProxyName: testRouteID, ProxyType: "http",
+				User: sessionUser(), ProxyName: testRouteID, ProxyType: "http",
 			})
+			return err
+		}},
+		{"CloseProxy", func() error {
+			_, err := authorizer.CloseProxy(context.Background(), frpplugin.CloseProxyContent{User: sessionUser(), ProxyName: testRouteID})
 			return err
 		}},
 	}
@@ -139,6 +152,7 @@ func TestEveryRegisteredCallbackReauthorizesItsRunProof(t *testing.T) {
 	for _, callback := range callbacks {
 		t.Run(callback.name, func(t *testing.T) {
 			before := len(repository.proofs)
+			beforeRegistrations := len(repository.registrations)
 			if err := callback.call(); err != nil {
 				t.Fatalf("first callback: %v", err)
 			}
@@ -147,6 +161,13 @@ func TestEveryRegisteredCallbackReauthorizesItsRunProof(t *testing.T) {
 			}
 			if got := len(repository.proofs) - before; got != 2 {
 				t.Fatalf("AuthorizeRun calls = %d, want 2", got)
+			}
+			wantRegistrations := 0
+			if callback.name == "NewProxy" {
+				wantRegistrations = 2
+			}
+			if got := len(repository.registrations) - beforeRegistrations; got != wantRegistrations {
+				t.Fatalf("registration grants = %d, want %d", got, wantRegistrations)
 			}
 			for _, proof := range repository.proofs[before:] {
 				if proof.RunID != testRunID || proof.Token != testRunToken {
@@ -171,6 +192,7 @@ func TestCredentialMetadataIsAnExactTwoFieldContract(t *testing.T) {
 		{"account access token", map[string]string{MetadataRunID: testRunID, MetadataRunToken: testRunToken, "access_token": "account-secret"}},
 		{"authorization header metadata", map[string]string{MetadataRunID: testRunID, MetadataRunToken: testRunToken, "authorization": "Bearer account-secret"}},
 		{"unknown metadata", map[string]string{MetadataRunID: testRunID, MetadataRunToken: testRunToken, "future_auth": "secret"}},
+		{"client chosen session", map[string]string{MetadataRunID: testRunID, MetadataRunToken: testRunToken, "nodelane_session_id": testSessionID}},
 	}
 
 	for _, test := range tests {
@@ -205,7 +227,7 @@ func TestRepositoryErrorsHaveStableSecretFreeClasses(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			repository := &recordingRepository{err: test.err}
-			_, err := newTestAuthorizer(t, repository).Ping(context.Background(), frpplugin.PingContent{User: frpplugin.UserInfo{Metas: testMetas(), RunID: testRunID}, PrivilegeKey: testRunToken})
+			_, err := newTestAuthorizer(t, repository).Ping(context.Background(), frpplugin.PingContent{User: sessionUser(), PrivilegeKey: testRunToken})
 			if !errors.Is(err, test.want) {
 				t.Fatalf("Ping error = %v, want %v", err, test.want)
 			}
@@ -232,19 +254,19 @@ func TestStoppedRunIsRejectedByEveryRegisteredCallback(t *testing.T) {
 			return err
 		}},
 		{"NewProxy", func() error {
-			_, _, err := authorizer.NewProxy(context.Background(), frpplugin.NewProxyContent{User: frpplugin.UserInfo{Metas: testMetas()}, ProxyName: testRouteID, ProxyType: "http", Subdomain: "demo"})
+			_, _, err := authorizer.NewProxy(context.Background(), frpplugin.NewProxyContent{User: sessionUser(), ProxyName: testRouteID, ProxyType: "http", Subdomain: "demo"})
 			return err
 		}},
 		{"Ping", func() error {
-			_, err := authorizer.Ping(context.Background(), frpplugin.PingContent{User: frpplugin.UserInfo{Metas: testMetas(), RunID: testRunID}, PrivilegeKey: testRunToken})
+			_, err := authorizer.Ping(context.Background(), frpplugin.PingContent{User: sessionUser(), PrivilegeKey: testRunToken})
 			return err
 		}},
 		{"NewWorkConn", func() error {
-			_, err := authorizer.NewWorkConn(context.Background(), frpplugin.NewWorkConnContent{User: frpplugin.UserInfo{Metas: testMetas(), RunID: testRunID}, RunID: testRunID, PrivilegeKey: testRunToken})
+			_, err := authorizer.NewWorkConn(context.Background(), frpplugin.NewWorkConnContent{User: sessionUser(), RunID: testSessionID, PrivilegeKey: testRunToken})
 			return err
 		}},
 		{"NewUserConn", func() error {
-			_, err := authorizer.NewUserConn(context.Background(), frpplugin.NewUserConnContent{User: frpplugin.UserInfo{Metas: testMetas()}, ProxyName: testRouteID, ProxyType: "http"})
+			_, err := authorizer.NewUserConn(context.Background(), frpplugin.NewUserConnContent{User: sessionUser(), ProxyName: testRouteID, ProxyType: "http"})
 			return err
 		}},
 	}
@@ -264,7 +286,7 @@ func TestNewProxyUsesOnlyTheAuthorizedHTTPRouteAndServerBandwidth(t *testing.T) 
 	repository := &recordingRepository{authorization: testAuthorization()}
 	authorizer := newTestAuthorizer(t, repository)
 	input := frpplugin.NewProxyContent{
-		User:      frpplugin.UserInfo{Metas: testMetas(), RunID: "frps-session"},
+		User:      sessionUser(),
 		ProxyName: testRouteID, ProxyType: "http", Subdomain: "demo",
 		UseEncryption: true, UseCompression: true, BandwidthLimit: "100GB", BandwidthLimitMode: "client",
 	}
@@ -324,7 +346,7 @@ func TestNewProxyRejectsEveryUnapprovedRouteMutation(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			repository := &recordingRepository{authorization: testAuthorization()}
 			authorizer := newTestAuthorizer(t, repository)
-			content := frpplugin.NewProxyContent{User: frpplugin.UserInfo{Metas: testMetas()}, ProxyName: testRouteID, ProxyType: "http", Subdomain: "demo"}
+			content := frpplugin.NewProxyContent{User: sessionUser(), ProxyName: testRouteID, ProxyType: "http", Subdomain: "demo"}
 			test.mutate(&content)
 			output, authorization, err := authorizer.NewProxy(context.Background(), content)
 			if !errors.Is(err, ErrInvalidCredential) {
@@ -333,8 +355,12 @@ func TestNewProxyRejectsEveryUnapprovedRouteMutation(t *testing.T) {
 			if !reflect.DeepEqual(output, frpplugin.NewProxyContent{}) || authorization != (domain.RunAuthorization{}) {
 				t.Fatalf("rejected request returned content/authorization: %#v %#v", output, authorization)
 			}
-			if len(repository.proofs) != 1 {
-				t.Fatalf("AuthorizeRun calls = %d, want 1", len(repository.proofs))
+			wantCalls := 1
+			if test.name == "frp user namespace" {
+				wantCalls = 0
+			}
+			if len(repository.proofs) != wantCalls || len(repository.registrations) != 0 {
+				t.Fatalf("invalid exposure authorization calls = %d, grants = %d", len(repository.proofs), len(repository.registrations))
 			}
 		})
 	}
@@ -358,8 +384,10 @@ func TestNewUserConnMatchesTheFreshlyAuthorizedProxy(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			repository := &recordingRepository{authorization: testAuthorization()}
 			authorizer := newTestAuthorizer(t, repository)
+			user := sessionUser()
+			user.User = test.user
 			_, err := authorizer.NewUserConn(context.Background(), frpplugin.NewUserConnContent{
-				User: frpplugin.UserInfo{User: test.user, Metas: testMetas()}, ProxyName: test.proxyName, ProxyType: test.proxyType,
+				User: user, ProxyName: test.proxyName, ProxyType: test.proxyType,
 			})
 			if test.wantErr && !errors.Is(err, ErrInvalidCredential) {
 				t.Fatalf("error = %v, want ErrInvalidCredential", err)
@@ -367,8 +395,12 @@ func TestNewUserConnMatchesTheFreshlyAuthorizedProxy(t *testing.T) {
 			if !test.wantErr && err != nil {
 				t.Fatalf("NewUserConn: %v", err)
 			}
-			if len(repository.proofs) != 1 {
-				t.Fatalf("AuthorizeRun calls = %d, want 1", len(repository.proofs))
+			wantCalls := 1
+			if test.user != "" {
+				wantCalls = 0
+			}
+			if len(repository.proofs) != wantCalls {
+				t.Fatalf("AuthorizeRun calls = %d, want %d", len(repository.proofs), wantCalls)
 			}
 		})
 	}
@@ -449,13 +481,13 @@ func TestLoginNormalizesFRPIdentityToTheAuthorizedRun(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Login: %v", err)
 			}
-			if output.RunID != testRunID || output.ClientID != testRunID {
+			if !frpplugin.ValidSessionID(output.RunID) || output.RunID == test.runID || output.ClientID != testRunID {
 				t.Fatalf("normalized identity = run_id %q client_id %q", output.RunID, output.ClientID)
 			}
 			if output.Version != input.Version || output.Hostname != input.Hostname {
 				t.Fatalf("non-identity Login fields changed: %#v", output)
 			}
-			if !reflect.DeepEqual(output.Metas, metas) {
+			if len(output.Metas) != 3 || output.Metas[MetadataRunID] != metas[MetadataRunID] || output.Metas[MetadataRunToken] != metas[MetadataRunToken] || output.Metas[frpplugin.MetadataSessionID] != output.RunID {
 				t.Fatalf("credential metadata was not preserved: %#v", output.Metas)
 			}
 			if authorization.Run.ID != testRunID || authorization.Route.ID != testRouteID {

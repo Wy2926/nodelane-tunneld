@@ -70,10 +70,10 @@ func TestRealRedisAnonymousHTTPLifecycleUsesGuardedNativeEvidence(t *testing.T) 
 		t.Fatal("valid anonymous login was rejected")
 	}
 	loginContent, ok := login.Content.(frpplugin.LoginContent)
-	if !ok || loginContent.RunID != allocation.Run.ID || loginContent.ClientID != allocation.Run.ID {
+	if !ok || !frpplugin.ValidSessionID(loginContent.RunID) || loginContent.ClientID != allocation.Run.ID {
 		t.Fatal("login did not bind the native client identity to the anonymous run")
 	}
-	user := frpplugin.UserInfo{RunID: allocation.Run.ID, Metas: proof}
+	user := frpplugin.UserInfo{RunID: loginContent.RunID, Metas: loginContent.Metas}
 	label, _, _ := strings.Cut(allocation.Run.PublicEndpoint, ".")
 	newProxy := frpplugin.NewProxyContent{User: user, ProxyName: allocation.Run.ProxyName, ProxyType: "http", Subdomain: label}
 	if lifecycleDispatch(t, dispatcher, frpplugin.OpNewProxy, newProxy).Reject {

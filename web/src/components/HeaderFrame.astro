@@ -1,0 +1,22 @@
+---
+interface Props {
+  homeHref: string;
+  homeLabel: string;
+}
+
+const { homeHref, homeLabel } = Astro.props;
+---
+
+<header class="site-header">
+  <div class="header-inner shell">
+    <a class="brand-lockup" href={homeHref} title={homeLabel} translate="no">
+      <img class="brand-mark" src="/nodelane-mark-96.png" width="96" height="96" alt="" />
+      <span class="brand-name">NodeLane</span>
+      <span class="brand-product" aria-current="page">Tunnel</span>
+    </a>
+    <slot name="nav" />
+    <div class="header-actions">
+      <slot name="actions" />
+    </div>
+  </div>
+</header>

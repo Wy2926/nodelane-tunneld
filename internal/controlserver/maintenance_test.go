@@ -94,3 +94,42 @@ func TestMaintenanceCancellationInterruptsInflightDatabaseWork(t *testing.T) {
 		t.Fatal("database operation outlived service")
 	}
 }
+
+func TestMaintenanceRecoversRunsBeforeReleasingNames(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ticks := make(chan time.Time, 1)
+	ticks <- time.Now()
+	calls := make(chan string, 3)
+	store := maintenanceProbe{
+		sweep: func(context.Context, int) (domain.SweepResult, error) {
+			calls <- "sweep"
+			return domain.SweepResult{}, nil
+		},
+		names: func(context.Context, int) (int, error) { calls <- "names"; cancel(); return 0, nil },
+	}
+	recover := func(ctx context.Context) error {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("unbounded recovery")
+		}
+		calls <- "reconcile"
+		return nil
+	}
+	done := make(chan struct{})
+	go func() { runMaintenance(ctx, ticks, store, recover); close(done) }()
+	for _, want := range []string{"sweep", "reconcile", "names"} {
+		select {
+		case got := <-calls:
+			if got != want {
+				t.Errorf("order=%s want=%s", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("worker stalled")
+		}
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not stop")
+	}
+}

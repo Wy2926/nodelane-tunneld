@@ -173,9 +173,18 @@ func (p *ControlPostgres) CreateRoute(ctx context.Context, cmd domain.CreateRout
 				return err
 			}
 			if holder.NameReleasedAt == nil && holder.Status == domain.RouteDeleted && holder.RecoverableUntil != nil && !now.Before(*holder.RecoverableUntil) {
-				if _, err := tx.ExecContext(ctx, `UPDATE tunnel_routes SET name_released_at=$2, updated_at=$2
-					WHERE id=$1 AND status='deleted' AND name_released_at IS NULL AND recoverable_until <= $2`, holder.ID, now); err != nil {
+				release, err := tx.ExecContext(ctx, `UPDATE tunnel_routes SET name_released_at=$2, updated_at=$2
+					WHERE id=$1 AND status='deleted' AND name_released_at IS NULL AND recoverable_until <= $2
+					AND NOT EXISTS (SELECT 1 FROM tunnel_runs WHERE route_id=$1 AND status IN ('starting','online','stopping'))`, holder.ID, now)
+				if err != nil {
 					return err
+				}
+				changed, err := release.RowsAffected()
+				if err != nil {
+					return err
+				}
+				if changed == 0 {
+					return domain.ErrSubdomainConflict
 				}
 			} else if holder.NameReleasedAt == nil {
 				return domain.ErrSubdomainConflict
@@ -321,9 +330,11 @@ func (p *ControlPostgres) ReleaseExpiredNames(ctx context.Context, limit int) (i
 	var released int
 	err := p.withControlTx(ctx, func(tx *sql.Tx) error {
 		released = 0
+		now := p.nowUTC()
 		rows, err := tx.QueryContext(ctx, `SELECT id, account_id::text FROM tunnel_routes
-			WHERE status='deleted' AND name_released_at IS NULL
-			ORDER BY recoverable_until, id LIMIT $1`, limit)
+			WHERE status='deleted' AND name_released_at IS NULL AND recoverable_until <= $2
+			AND NOT EXISTS (SELECT 1 FROM tunnel_runs WHERE route_id=tunnel_routes.id AND status IN ('starting','online','stopping'))
+			ORDER BY recoverable_until, id LIMIT $1`, limit, now)
 		if err != nil {
 			return err
 		}
@@ -358,10 +369,11 @@ func (p *ControlPostgres) ReleaseExpiredNames(ctx context.Context, limit int) (i
 		if err := lockControlRoutes(ctx, tx, routeIDs...); err != nil {
 			return err
 		}
-		now := p.nowUTC()
+		now = p.nowUTC()
 		for _, candidate := range candidates {
 			result, err := tx.ExecContext(ctx, `UPDATE tunnel_routes SET name_released_at=$2, updated_at=$2
-				WHERE id=$1 AND status='deleted' AND name_released_at IS NULL AND recoverable_until <= $2`, candidate.RouteID, now)
+				WHERE id=$1 AND status='deleted' AND name_released_at IS NULL AND recoverable_until <= $2
+				AND NOT EXISTS (SELECT 1 FROM tunnel_runs WHERE route_id=$1 AND status IN ('starting','online','stopping'))`, candidate.RouteID, now)
 			if err != nil {
 				return err
 			}

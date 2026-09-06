@@ -35,6 +35,38 @@ func (p *ControlPostgres) AuthorizeRun(ctx context.Context, proof domain.RunProo
 	return result, nil
 }
 
+func (p *ControlPostgres) AuthorizeProxyRegistration(ctx context.Context, proof domain.RunProof) (domain.RunAuthorization, error) {
+	credentialID, err := identity.ParseRunCredential(proof.Token)
+	if err != nil || proof.RunID == "" {
+		return domain.RunAuthorization{}, domain.ErrInvalidRunProof
+	}
+	var result domain.RunAuthorization
+	err = p.withControlTx(ctx, func(tx *sql.Tx) error {
+		route, run, credential, err := lockControlProofRun(ctx, tx, proof.RunID)
+		if err != nil {
+			return err
+		}
+		if !p.matchesControlRunProof(proof, credentialID, run, credential) {
+			return domain.ErrInvalidRunProof
+		}
+		if !run.AllowsConnectionAt(route, credential, p.nowUTC()) {
+			return domain.ErrRunStopped
+		}
+		run, err = scanControlRun(tx.QueryRowContext(ctx, `UPDATE tunnel_runs
+			SET proxy_registration_granted=TRUE
+			WHERE id=$1 RETURNING `+controlRunColumns, run.ID))
+		if err != nil {
+			return err
+		}
+		result = domain.RunAuthorization{Route: route, Run: run, CredentialID: credential.ID}
+		return nil
+	})
+	if err != nil {
+		return domain.RunAuthorization{}, err
+	}
+	return result, nil
+}
+
 func (p *ControlPostgres) matchesControlRunProof(proof domain.RunProof, credentialID string, run domain.Run, credential domain.RunCredential) bool {
 	return proof.RunID == run.ID && credential.RunID == run.ID && credential.ID == credentialID &&
 		identity.TokenHashEqual(credential.SecretHash, identity.HashToken(p.runPepper, proof.Token))
