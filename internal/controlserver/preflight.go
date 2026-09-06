@@ -82,8 +82,8 @@ func preflight(cfg Config) (string, error) {
 	if stock.Transport.HeartbeatTimeout <= 0 || stock.Transport.HeartbeatTimeout > 90 {
 		return "", errors.New("FRPS_CONFIG_FILE must set a positive heartbeat timeout of at most 90 seconds")
 	}
-	if stock.BindPort != cfg.FRPServerPort || stock.SubDomainHost != cfg.PublicDomain || stock.VhostHTTPPort < 1 {
-		return "", errors.New("FRPS_CONFIG_FILE public port, HTTP listener, or subdomain host does not match")
+	if stock.BindPort != cfg.frpsBindPort() || stock.SubDomainHost != cfg.PublicDomain || stock.VhostHTTPPort < 1 {
+		return "", errors.New("FRPS_CONFIG_FILE bind port, HTTP listener, or subdomain host does not match")
 	}
 	if stock.SSHTunnelGateway.BindPort != 0 {
 		return "", errors.New("FRPS_CONFIG_FILE SSH tunnel gateway must be disabled")

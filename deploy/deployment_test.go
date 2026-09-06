@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wy2926/nodelane-tunneld/internal/controlserver"
 	frpconfig "github.com/fatedier/frp/pkg/config"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/config/v1/validation"
@@ -82,6 +84,42 @@ func TestDeploymentUsesStockPrivatePluginAuthorization(t *testing.T) {
 	}
 }
 
+func TestDeploymentFRPSBindPortIsIndependentOfPublicPort(t *testing.T) {
+	source, err := os.ReadFile("frps.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, public, bind string
+		want               int
+	}{
+		{"default", "7000", "", 7000},
+		{"nondefault fallback", "7001", "", 7001},
+		{"TCP forwarded", "7001", "7000", 7000},
+		{"minimum internal", "7001", "1", 1},
+		{"maximum internal", "7001", "65535", 65535},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			values := deploymentValues()
+			values["FRP_SERVER_PORT"] = test.public
+			if test.bind != "" {
+				values["FRPS_BIND_PORT"] = test.bind
+			}
+			rendered, err := frpconfig.RenderWithTemplate(source, &frpconfig.Values{Envs: values})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cfg v1.ServerConfig
+			if err := frpconfig.LoadConfigure(rendered, &cfg, true, "toml"); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.BindPort != test.want {
+				t.Fatalf("frps bindPort=%d, want %d", cfg.BindPort, test.want)
+			}
+		})
+	}
+}
+
 type composeService struct {
 	Image       string            `yaml:"image"`
 	Network     string            `yaml:"network_mode"`
@@ -131,6 +169,9 @@ func TestDeploymentMountsPrivateKeyOnlyIntoFRPS(t *testing.T) {
 		if _, exists := service.Environment["FRP_AUTH_TOKEN"]; exists {
 			t.Fatal("shared auth token must not be passed to either process")
 		}
+		if service.Environment["FRP_SERVER_PORT"] != "${FRP_SERVER_PORT:-7000}" || service.Environment["FRPS_BIND_PORT"] != "${FRPS_BIND_PORT:-}" {
+			t.Fatal("public and optional internal FRP ports must have matching explicit defaults")
+		}
 	}
 	control := cfg.Services["tunneld"].Environment
 	if control["LISTEN_ADDR"] != "127.0.0.1:9000" || control["FRP_PLUGIN_LISTEN_ADDR"] != "127.0.0.1:9001" || control["FRPS_ADMIN_URL"] != "http://127.0.0.1:7500" {
@@ -145,6 +186,79 @@ func TestDeploymentMountsPrivateKeyOnlyIntoFRPS(t *testing.T) {
 		if control[name] != value {
 			t.Fatalf("frps template input %s differs between processes", name)
 		}
+	}
+}
+
+func TestDeploymentComposeKeepsFRPPortInputsAligned(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("Docker Compose CLI unavailable")
+	}
+	file := filepath.Join(t.TempDir(), "empty.env")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile("frps.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, public, bind string
+		wantPublic         int
+		wantBind           int
+	}{
+		{"defaults", "", "", 7000, 7000},
+		{"nondefault fallback", "7001", "", 7001, 7001},
+		{"TCP forwarded", "7001", "7000", 7001, 7000},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			values := deploymentValues()
+			values["FRP_SERVER_PORT"], values["FRPS_BIND_PORT"] = test.public, test.bind
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, "docker", "compose", "--env-file", file, "-f", "compose.yaml", "-f", "compose.registry.yaml", "config", "--format", "json")
+			command.Env = os.Environ()
+			for name, value := range values {
+				command.Env = append(command.Env, name+"="+value)
+			}
+			output, err := command.Output()
+			if err != nil {
+				t.Fatalf("Compose port configuration failed: %v", err)
+			}
+			var cfg struct {
+				Services map[string]struct {
+					Environment map[string]string `json:"environment"`
+				} `json:"services"`
+			}
+			if err := json.Unmarshal(output, &cfg); err != nil {
+				t.Fatal("Compose returned invalid structured configuration")
+			}
+			control := cfg.Services["tunneld"].Environment
+			for _, name := range []string{"FRP_SERVER_PORT", "FRPS_BIND_PORT"} {
+				value, present := control[name]
+				stockValue, stockPresent := cfg.Services["frps"].Environment[name]
+				if !present || !stockPresent || value != stockValue {
+					t.Fatal("Compose gave the two processes different FRP port inputs")
+				}
+			}
+			for name, value := range control {
+				t.Setenv(name, value)
+			}
+			t.Setenv("FRP_AUTH_TOKEN", "")
+			controlConfig, err := controlserver.LoadConfig()
+			if err != nil || controlConfig.FRPServerPort != test.wantPublic || controlConfig.FRPSBindPort != test.wantBind {
+				t.Fatalf("Compose control-plane port parsing disagrees with configured defaults: %v", err)
+			}
+			for _, name := range []string{"tunneld", "frps"} {
+				rendered, err := frpconfig.RenderWithTemplate(source, &frpconfig.Values{Envs: cfg.Services[name].Environment})
+				if err != nil {
+					t.Fatal("Compose environment did not render the shared frps template")
+				}
+				var stock v1.ServerConfig
+				if err := frpconfig.LoadConfigure(rendered, &stock, true, "toml"); err != nil || stock.BindPort != controlConfig.FRPSBindPort {
+					t.Fatal("Compose frps template disagrees with the control-plane internal listener")
+				}
+			}
+		})
 	}
 }
 

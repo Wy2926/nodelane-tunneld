@@ -65,12 +65,72 @@ func TestConfigurationRejectsLegacyFRPSharedToken(t *testing.T) {
 }
 
 func TestConfigurationErrorsDoNotEchoValues(t *testing.T) {
-	for _, name := range []string{"CONTROL_REPLAY_KEY", "FRP_SERVER_PORT", "TCP_PORT_START", "TRUSTED_PROXY_CIDRS", "OIDC_ISSUER"} {
+	for _, name := range []string{"CONTROL_REPLAY_KEY", "FRP_SERVER_PORT", "FRPS_BIND_PORT", "TCP_PORT_START", "TRUSTED_PROXY_CIDRS", "OIDC_ISSUER"} {
 		values := configEnvironment()
 		values[name] = "sensitive-invalid-value"
 		_, err := parseConfig(func(key string) string { return values[key] })
 		if err == nil || strings.Contains(err.Error(), values[name]) {
 			t.Errorf("invalid %s was accepted or echoed: %v", name, err)
+		}
+	}
+}
+
+func TestConfigurationRejectsInvalidFRPSBindPort(t *testing.T) {
+	for _, raw := range []string{"0", "-1", "65536", "7000.5", " 7000 ", "sensitive-invalid-value", "999999999999999999999999999999"} {
+		t.Run(raw, func(t *testing.T) {
+			values := configEnvironment()
+			values["FRPS_BIND_PORT"] = raw
+			_, err := parseConfig(func(key string) string { return values[key] })
+			if err == nil || !strings.Contains(err.Error(), "FRPS_BIND_PORT") || strings.Contains(err.Error(), raw) {
+				t.Fatalf("invalid internal port was accepted or echoed: %v", err)
+			}
+		})
+	}
+}
+
+func TestConfigurationSeparatesPublicAndInternalFRPPorts(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		ports        map[string]string
+		public, bind int
+	}{
+		{"defaults", nil, 7000, 7000},
+		{"nondefault public", map[string]string{"FRP_SERVER_PORT": "7001"}, 7001, 7001},
+		{"empty internal", map[string]string{"FRP_SERVER_PORT": "7001", "FRPS_BIND_PORT": ""}, 7001, 7001},
+		{"TCP forwarded", map[string]string{"FRP_SERVER_PORT": "7001", "FRPS_BIND_PORT": "7000"}, 7001, 7000},
+		{"minimum internal", map[string]string{"FRPS_BIND_PORT": "1"}, 7000, 1},
+		{"maximum internal", map[string]string{"FRPS_BIND_PORT": "65535"}, 7000, 65535},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			values := configEnvironment()
+			for name, value := range test.ports {
+				values[name] = value
+			}
+			cfg, err := parseConfig(func(key string) string { return values[key] })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.FRPServerPort != test.public || cfg.FRPSBindPort != test.bind {
+				t.Fatalf("public/bind ports=%d/%d, want %d/%d", cfg.FRPServerPort, cfg.FRPSBindPort, test.public, test.bind)
+			}
+		})
+	}
+}
+
+func TestConfigurationValidatesProgrammaticFRPSBindPort(t *testing.T) {
+	values := configEnvironment()
+	cfg, err := parseConfig(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.FRPServerPort, cfg.FRPSBindPort = 7001, 0
+	if err := cfg.Validate(); err != nil || cfg.frpsBindPort() != 7001 {
+		t.Fatalf("omitted programmatic bind port did not use public port: %v", err)
+	}
+	for _, port := range []int{-1, 65536} {
+		cfg.FRPSBindPort = port
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "FRPS_BIND_PORT") {
+			t.Fatalf("invalid programmatic bind port accepted: %v", err)
 		}
 	}
 }

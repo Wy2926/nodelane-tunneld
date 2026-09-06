@@ -1,10 +1,11 @@
 # Complete stock frps 0.70.0 configuration for a fresh control-plane deployment.
 # Both processes render this same file with matching environment settings.
 
-# frpc control connection. Port 7000 must be a raw TCP route to frps. Do not
-# attach an HTTP/HTTPS health check or a layer-7 reverse proxy to this port.
+# frpc control connection. An optional internal listener can differ from the
+# public FRP_SERVER_PORT. Forward raw TCP without HTTP proxying or TLS termination.
+# Do not attach an HTTP/HTTPS health check to this listener.
 bindAddr = "0.0.0.0"
-bindPort = {{ .Envs.FRP_SERVER_PORT }}
+bindPort = {{ if .Envs.FRPS_BIND_PORT }}{{ .Envs.FRPS_BIND_PORT }}{{ else }}{{ .Envs.FRP_SERVER_PORT }}{{ end }}
 
 # HTTP tunnel traffic enters here from the public reverse proxy.
 # Keep 8080 private; the wildcard reverse proxy forwards requests to this port

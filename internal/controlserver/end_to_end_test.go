@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -55,8 +56,10 @@ func TestPersistentControlAndStockFRPEndToEnd(t *testing.T) {
 	defer cancel()
 	caPath, certificatePath, keyPath := endToEndCertificates(t)
 	pluginListener := endToEndListener(t)
+	forwarderListener := endToEndListener(t)
 	frpPort, publicPort, adminPort := endToEndPorts(t)
-	f.cfg.FRPServerAddr, f.cfg.FRPServerPort = "127.0.0.1", frpPort
+	forwarderPort := forwarderListener.Addr().(*net.TCPAddr).Port
+	f.cfg.FRPServerAddr, f.cfg.FRPServerPort, f.cfg.FRPSBindPort = "127.0.0.1", forwarderPort, frpPort
 	f.cfg.FRPTLSServerName, f.cfg.FRPTrustedCAFile = "frps.e2e.test", caPath
 	f.cfg.PluginListenAddr = pluginListener.Addr().String()
 	f.cfg.FRPSAdminURL = fmt.Sprintf("http://127.0.0.1:%d", adminPort)
@@ -96,6 +99,7 @@ func TestPersistentControlAndStockFRPEndToEnd(t *testing.T) {
 	// Stock's default mux listener does not unblock Accept on Close. The
 	// bounded child process owns that upstream goroutine and all its sockets.
 	defer stockServer.Close()
+	forwardedConnections := endToEndTCPForwarder(t, forwarderListener, fmt.Sprintf("127.0.0.1:%d", frpPort))
 
 	account, err := runtime.postgres.ResolveAccount(ctx, f.cfg.OIDCIssuer, "end-to-end-fixture")
 	if err != nil {
@@ -116,6 +120,9 @@ func TestPersistentControlAndStockFRPEndToEnd(t *testing.T) {
 	bootstrap, err := api.Bootstrap(ctx)
 	if err != nil || runclient.ValidateBootstrapConfig(bootstrap, "") != nil {
 		t.Fatalf("fetch and validate public bootstrap: %v", err)
+	}
+	if bootstrap.FRP.ServerPort != forwarderPort || bootstrap.FRP.ServerPort == frpPort {
+		t.Fatal("public bootstrap did not advertise the TCP forwarder's external port")
 	}
 	run, err := api.Redeem(ctx, launch.Token, "end-to-end-redemption")
 	if err != nil {
@@ -198,10 +205,10 @@ func TestPersistentControlAndStockFRPEndToEnd(t *testing.T) {
 		body, err := io.ReadAll(io.LimitReader(response.Body, 4096))
 		return err == nil && response.StatusCode == http.StatusOK && string(body) == marker+":/end-to-end"
 	}
-	if !forwarded() || backendHits.Load() != 1 {
+	if !forwarded() || backendHits.Load() != 1 || forwardedConnections.Load() == 0 {
 		t.Fatal("real stock frps/frpc did not forward the local HTTP response")
 	}
-	t.Log("public HTTP request traversed stock frps/frpc TLS and reached the real local backend")
+	t.Log("public HTTP request traversed the distinct-port raw TCP forwarder and stock frps/frpc TLS to the real local backend")
 	if _, err := api.Stop(ctx, run.ID, run.CredentialToken); err != nil {
 		t.Fatalf("stop real run through its public API: %v", err)
 	}
@@ -257,6 +264,66 @@ func endToEndListener(t *testing.T) net.Listener {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 	return listener
+}
+
+func endToEndTCPForwarder(t *testing.T, listener net.Listener, upstreamAddress string) *atomic.Int32 {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	var connections atomic.Int32
+	var active sync.WaitGroup
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer active.Wait()
+		for {
+			downstream, err := listener.Accept()
+			if err != nil {
+				if ctx.Err() == nil {
+					t.Error("raw TCP forwarder listener failed")
+				}
+				return
+			}
+			active.Add(1)
+			go func() {
+				defer active.Done()
+				defer downstream.Close()
+				dialer := net.Dialer{Timeout: 2 * time.Second}
+				upstream, err := dialer.DialContext(ctx, "tcp", upstreamAddress)
+				if err != nil {
+					if ctx.Err() == nil {
+						t.Error("raw TCP forwarder could not reach stock frps")
+					}
+					return
+				}
+				defer upstream.Close()
+				connections.Add(1)
+				stopClose := context.AfterFunc(ctx, func() {
+					_ = downstream.Close()
+					_ = upstream.Close()
+				})
+				defer stopClose()
+				uploadDone := make(chan struct{})
+				go func() {
+					defer close(uploadDone)
+					_, _ = io.Copy(upstream, downstream)
+					_ = upstream.(*net.TCPConn).CloseWrite()
+				}()
+				_, _ = io.Copy(downstream, upstream)
+				_ = downstream.(*net.TCPConn).CloseWrite()
+				<-uploadDone
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = listener.Close()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("raw TCP forwarder did not stop within its cleanup bound")
+		}
+	})
+	return &connections
 }
 
 func endToEndPorts(t *testing.T) (int, int, int) {

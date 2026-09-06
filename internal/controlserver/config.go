@@ -30,7 +30,7 @@ type Config struct {
 	AnonymousPepper, AnonymousReplayKey, AnonymousFenceToken                           []byte
 	OIDCIssuer, OIDCResource, OIDCWebClientID, OIDCWebClientSecret, OIDCNativeClientID string
 	FRPServerAddr, FRPTLSServerName, FRPTrustedCAFile, FRPBandwidth, FRPSConfigFile    string
-	FRPServerPort                                                                      int
+	FRPServerPort, FRPSBindPort                                                        int
 	FRPSAdminURL, FRPSAdminUsername, FRPSAdminPassword                                 string
 	TCPPortStart, TCPPortEnd, UDPPortStart, UDPPortEnd                                 int
 	TrustedProxyRanges                                                                 []netip.Prefix
@@ -76,6 +76,17 @@ func parseConfig(lookup func(string) string) (Config, error) {
 			}
 			*item.target = parsed
 		}
+	}
+	cfg.FRPSBindPort = cfg.FRPServerPort
+	if raw := lookup("FRPS_BIND_PORT"); raw != "" {
+		port, err := strconv.Atoi(raw)
+		if err != nil {
+			return Config{}, errors.New("FRPS_BIND_PORT must be an integer")
+		}
+		if port < 1 || port > 65535 {
+			return Config{}, errors.New("invalid FRPS_BIND_PORT")
+		}
+		cfg.FRPSBindPort = port
 	}
 	secrets := []*[]byte{&cfg.LaunchPepper, &cfg.RunPepper, &cfg.ReplayKey, &cfg.SessionKey, &cfg.AnonymousPepper, &cfg.AnonymousReplayKey, &cfg.AnonymousFenceToken}
 	for index, name := range secretConfigNames {
@@ -133,6 +144,9 @@ func (c Config) Validate() error {
 	if c.FRPServerPort < 1 || c.FRPServerPort > 65535 || c.RedisDB < 0 || c.RedisDB > 15 {
 		return errors.New("invalid FRP_SERVER_PORT or REDIS_DB")
 	}
+	if port := c.frpsBindPort(); port < 1 || port > 65535 {
+		return errors.New("invalid FRPS_BIND_PORT")
+	}
 	if _, _, err := net.SplitHostPort(c.ListenAddr); err != nil {
 		return errors.New("LISTEN_ADDR must be a host:port address")
 	}
@@ -163,6 +177,14 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func (c Config) frpsBindPort() int {
+	// An omitted bind port in programmatic configurations keeps the public-port default.
+	if c.FRPSBindPort == 0 {
+		return c.FRPServerPort
+	}
+	return c.FRPSBindPort
 }
 
 func loopbackListener(value string) bool {

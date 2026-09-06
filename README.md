@@ -107,6 +107,13 @@ and management listeners bind loopback; the reverse proxy exposes only the
 intended application and tunnel entrypoints. Do not expose the management API,
 plugin listener, PostgreSQL, or Redis publicly.
 
+`FRP_SERVER_PORT` is the public port advertised to clients. The optional
+`FRPS_BIND_PORT` is frps's internal listener and defaults to `FRP_SERVER_PORT`
+when unset or empty. For public `7001` forwarded to internal `7000`, set
+`FRP_SERVER_PORT=7001` and `FRPS_BIND_PORT=7000` in the shared environment file.
+Use raw TCP passthrough, such as an Nginx/OpenResty stream proxy, without HTTP
+proxying or TLS termination; frps must retain end-to-end TLS and SNI validation.
+
 Validate configuration without starting services:
 
 ```sh

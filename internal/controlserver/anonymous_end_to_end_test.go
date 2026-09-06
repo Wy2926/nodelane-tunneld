@@ -69,7 +69,7 @@ func TestAnonymousPersistentControlAndStockFRPEndToEnd(t *testing.T) {
 	defer udpReservation.Close()
 	tcpPort, udpPort := tcpReservation.Addr().(*net.TCPAddr).Port, udpReservation.LocalAddr().(*net.UDPAddr).Port
 	frpPort, httpPort, adminPort := endToEndPorts(t)
-	f.cfg.FRPServerAddr, f.cfg.FRPServerPort = "127.0.0.1", frpPort
+	f.cfg.FRPServerAddr, f.cfg.FRPServerPort, f.cfg.FRPSBindPort = "127.0.0.1", frpPort, frpPort
 	f.cfg.FRPTLSServerName, f.cfg.FRPTrustedCAFile = "frps.e2e.test", caPath
 	f.cfg.PluginListenAddr = pluginListener.Addr().String()
 	f.cfg.FRPSAdminURL = fmt.Sprintf("http://127.0.0.1:%d", adminPort)

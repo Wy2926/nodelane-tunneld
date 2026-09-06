@@ -43,7 +43,7 @@ func preparedConfig(t *testing.T) (Config, v1.ServerConfig) {
 		t.Fatal(err)
 	}
 	stock := v1.ServerConfig{
-		BindAddr: "127.0.0.1", BindPort: cfg.FRPServerPort, VhostHTTPPort: 8080, SubDomainHost: cfg.PublicDomain,
+		BindAddr: "127.0.0.1", BindPort: cfg.frpsBindPort(), VhostHTTPPort: 8080, SubDomainHost: cfg.PublicDomain,
 		Auth:        v1.AuthServerConfig{Method: "token", AdditionalScopes: []v1.AuthScope{v1.AuthScopeHeartBeats, v1.AuthScopeNewWorkConns}},
 		Transport:   v1.ServerTransportConfig{HeartbeatTimeout: 45, TLS: v1.TLSServerConfig{Force: true, TLSConfig: v1.TLSConfig{CertFile: cfg.FRPTrustedCAFile, KeyFile: filepath.Join(directory, "server-only-private-key.pem")}}},
 		WebServer:   v1.WebServerConfig{Addr: "127.0.0.1", Port: 7500, User: cfg.FRPSAdminUsername, Password: cfg.FRPSAdminPassword},
@@ -84,6 +84,7 @@ func TestPreflightRequiresMatchingStockFRPAuthorizationAndTLSConfiguration(t *te
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg, stock := preparedConfig(t)
+			cfg.FRPServerPort = 7001
 			test.mutate(&stock)
 			writeStockConfig(t, cfg.FRPSConfigFile, stock)
 			if _, err := preflight(cfg); err == nil || strings.Contains(err.Error(), "private-bad") {
@@ -108,5 +109,28 @@ func TestPreflightPublishesCertificatesOnlyAndChecksSNI(t *testing.T) {
 	}
 	if _, err := preflight(cfg); err == nil || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("private material accepted or leaked: %v", err)
+	}
+}
+
+func TestPreflightAcceptsTCPForwardedPublicPort(t *testing.T) {
+	cfg, stock := preparedConfig(t)
+	cfg.FRPServerPort, cfg.FRPSBindPort = 7001, 7000
+	if _, err := preflight(cfg); err != nil {
+		t.Fatalf("public port forwarded to the configured internal listener was rejected: %v", err)
+	}
+	stock.BindPort = 7001
+	writeStockConfig(t, cfg.FRPSConfigFile, stock)
+	if _, err := preflight(cfg); err == nil {
+		t.Fatal("public port incorrectly substituted for the configured internal listener")
+	}
+}
+
+func TestPreflightDefaultsOmittedProgrammaticBindPortToPublicPort(t *testing.T) {
+	cfg, stock := preparedConfig(t)
+	cfg.FRPServerPort, cfg.FRPSBindPort = 7001, 0
+	stock.BindPort = 7001
+	writeStockConfig(t, cfg.FRPSConfigFile, stock)
+	if _, err := preflight(cfg); err != nil {
+		t.Fatalf("omitted bind port did not match the public-port default: %v", err)
 	}
 }

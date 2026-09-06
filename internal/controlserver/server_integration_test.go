@@ -28,6 +28,7 @@ import (
 
 func TestRealPersistentServiceMountsNewAPIRefreshesSessionAndObservesNativeConnection(t *testing.T) {
 	f := isolatedFixture(t)
+	f.cfg.FRPServerPort, f.cfg.FRPSBindPort = 7001, 7000
 	var refreshed atomic.Int32
 	var oidcServer *httptest.Server
 	oidcServer = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -93,6 +94,12 @@ func TestRealPersistentServiceMountsNewAPIRefreshesSessionAndObservesNativeConne
 			t.Error(err)
 		}
 	})
+	bootstrapResponse := httptest.NewRecorder()
+	runtime.Handler().ServeHTTP(bootstrapResponse, httptest.NewRequest(http.MethodGet, "/api/v1/client-config", nil))
+	var bootstrap ClientConfig
+	if err := json.Unmarshal(bootstrapResponse.Body.Bytes(), &bootstrap); err != nil || bootstrapResponse.Code != http.StatusOK || bootstrap.FRP.ServerPort != 7001 {
+		t.Fatalf("public client configuration did not retain the external FRP port: status=%d err=%v", bootstrapResponse.Code, err)
+	}
 	account, err := runtime.postgres.ResolveAccount(context.Background(), f.cfg.OIDCIssuer, "fixture-subject")
 	if err != nil {
 		t.Fatal(err)
