@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
+	"strings"
 )
 
 const APIVersion = "0.1.0"
@@ -58,6 +60,9 @@ func DecodeRequest(reader io.Reader, queryVersion, queryOp string) (Request, err
 	if err := rejectDuplicateJSONKeys(data); err != nil {
 		return request, fmt.Errorf("validate callback envelope: %w", err)
 	}
+	if err := validateExactJSONFields(data, reflect.TypeOf(request)); err != nil {
+		return request, fmt.Errorf("validate callback envelope fields: %w", err)
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
@@ -88,6 +93,9 @@ func DecodeRequest(reader io.Reader, queryVersion, queryOp string) (Request, err
 func (r Request) DecodeContent(target any) error {
 	if err := rejectDuplicateJSONKeys(r.Content); err != nil {
 		return fmt.Errorf("validate %s callback content: %w", r.Op, err)
+	}
+	if err := validateExactJSONFields(r.Content, reflect.TypeOf(target)); err != nil {
+		return fmt.Errorf("validate %s callback content fields: %w", r.Op, err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(r.Content))
 	decoder.DisallowUnknownFields()
@@ -173,6 +181,112 @@ func scanJSONValue(decoder *json.Decoder) error {
 		return errors.New("invalid JSON opening delimiter")
 	}
 	return nil
+}
+
+func validateExactJSONFields(data []byte, targetType reflect.Type) error {
+	if targetType == nil {
+		return errors.New("JSON target type is required")
+	}
+	for targetType.Kind() == reflect.Pointer {
+		targetType = targetType.Elem()
+	}
+	return validateJSONValueType(data, targetType)
+}
+
+func validateJSONValueType(data []byte, targetType reflect.Type) error {
+	for targetType.Kind() == reflect.Pointer {
+		if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+			return nil
+		}
+		targetType = targetType.Elem()
+	}
+
+	switch targetType.Kind() {
+	case reflect.Struct:
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(data, &object); err != nil {
+			return err
+		}
+		if object == nil {
+			return errors.New("JSON object is required")
+		}
+		fields, err := exactJSONFields(targetType)
+		if err != nil {
+			return err
+		}
+		for key, value := range object {
+			fieldType, ok := fields[key]
+			if !ok {
+				return fmt.Errorf("unknown JSON field %q", key)
+			}
+			if err := validateJSONValueType(value, fieldType); err != nil {
+				return fmt.Errorf("field %q: %w", key, err)
+			}
+		}
+	case reflect.Array, reflect.Slice:
+		if targetType == reflect.TypeFor[json.RawMessage]() {
+			return nil
+		}
+		elementType := targetType.Elem()
+		for elementType.Kind() == reflect.Pointer {
+			elementType = elementType.Elem()
+		}
+		if elementType.Kind() != reflect.Struct {
+			return nil
+		}
+		var elements []json.RawMessage
+		if err := json.Unmarshal(data, &elements); err != nil {
+			return err
+		}
+		for index, element := range elements {
+			if err := validateJSONValueType(element, targetType.Elem()); err != nil {
+				return fmt.Errorf("element %d: %w", index, err)
+			}
+		}
+	}
+	return nil
+}
+
+func exactJSONFields(targetType reflect.Type) (map[string]reflect.Type, error) {
+	fields := make(map[string]reflect.Type)
+	for index := 0; index < targetType.NumField(); index++ {
+		field := targetType.Field(index)
+		if !field.IsExported() {
+			continue
+		}
+		tag := field.Tag.Get("json")
+		name, _, _ := strings.Cut(tag, ",")
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			if field.Anonymous {
+				embedded := field.Type
+				for embedded.Kind() == reflect.Pointer {
+					embedded = embedded.Elem()
+				}
+				if embedded.Kind() == reflect.Struct {
+					embeddedFields, err := exactJSONFields(embedded)
+					if err != nil {
+						return nil, err
+					}
+					for embeddedName, embeddedType := range embeddedFields {
+						if _, exists := fields[embeddedName]; exists {
+							return nil, fmt.Errorf("ambiguous JSON field %q", embeddedName)
+						}
+						fields[embeddedName] = embeddedType
+					}
+					continue
+				}
+			}
+			name = field.Name
+		}
+		if _, exists := fields[name]; exists {
+			return nil, fmt.Errorf("ambiguous JSON field %q", name)
+		}
+		fields[name] = field.Type
+	}
+	return fields, nil
 }
 
 // Response mirrors pkg/plugin/server.Response in frp v0.70.0.

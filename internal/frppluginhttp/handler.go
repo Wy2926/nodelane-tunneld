@@ -11,14 +11,17 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"time"
 
 	"github.com/Wy2926/nodelane-tunneld/internal/frpplugin"
 )
 
 const (
-	InvalidRequestReason = "invalid plugin request"
-	UnavailableReason    = "authorization unavailable"
-	maxQueryBytes        = 256
+	InvalidRequestReason   = "invalid plugin request"
+	UnavailableReason      = "authorization unavailable"
+	maxQueryBytes          = 256
+	defaultDispatchTimeout = 3 * time.Second
+	maxDispatchTimeout     = 30 * time.Second
 )
 
 var ErrInvalidConfiguration = errors.New("invalid frp plugin HTTP configuration")
@@ -28,55 +31,88 @@ type Dispatcher interface {
 }
 
 type Handler struct {
-	dispatcher Dispatcher
+	dispatcher      Dispatcher
+	dispatchTimeout time.Duration
 }
 
-func New(dispatcher Dispatcher) (*Handler, error) {
-	if nilDispatcher(dispatcher) {
+type Options struct {
+	Dispatcher      Dispatcher
+	DispatchTimeout time.Duration
+}
+
+func New(options Options) (*Handler, error) {
+	if nilDispatcher(options.Dispatcher) || options.DispatchTimeout < 0 || options.DispatchTimeout > maxDispatchTimeout {
 		return nil, ErrInvalidConfiguration
 	}
-	return &Handler{dispatcher: dispatcher}, nil
+	if options.DispatchTimeout == 0 {
+		options.DispatchTimeout = defaultDispatchTimeout
+	}
+	return &Handler{dispatcher: options.Dispatcher, dispatchTimeout: options.DispatchTimeout}, nil
 }
 
 func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	setResponseHeaders(writer.Header())
-	deferredResponse := true
+	responded := false
 	defer func() {
-		if recover() != nil && deferredResponse {
-			writeResponse(writer, http.StatusOK, rejected(UnavailableReason))
+		if recover() != nil && !responded {
+			responded = writeResponse(writer, http.StatusOK, rejected(UnavailableReason))
 		}
 	}()
 
 	if request.Method != http.MethodPost {
 		writer.Header().Set("Allow", http.MethodPost)
-		deferredResponse = false
-		writeResponse(writer, http.StatusMethodNotAllowed, rejected(InvalidRequestReason))
+		responded = writeResponse(writer, http.StatusMethodNotAllowed, rejected(InvalidRequestReason))
 		return
 	}
 	if !officialContentType(request.Header) {
-		deferredResponse = false
-		writeResponse(writer, http.StatusUnsupportedMediaType, rejected(InvalidRequestReason))
+		responded = writeResponse(writer, http.StatusUnsupportedMediaType, rejected(InvalidRequestReason))
 		return
 	}
 	queryVersion, queryOperation, ok := officialQuery(request.URL.RawQuery)
 	if !ok || request.ContentLength > frpplugin.MaxRequestBytes {
-		deferredResponse = false
-		writeResponse(writer, http.StatusOK, rejected(InvalidRequestReason))
+		responded = writeResponse(writer, http.StatusOK, rejected(InvalidRequestReason))
 		return
 	}
 	pluginRequest, err := frpplugin.DecodeRequest(request.Body, queryVersion, queryOperation)
 	if err != nil {
-		deferredResponse = false
-		writeResponse(writer, http.StatusOK, rejected(InvalidRequestReason))
+		responded = writeResponse(writer, http.StatusOK, rejected(InvalidRequestReason))
 		return
 	}
-	response, err := h.dispatcher.Dispatch(request.Context(), pluginRequest)
+	response, err := h.dispatch(request.Context(), pluginRequest)
 	if err != nil {
 		response = rejected(UnavailableReason)
 	}
-	deferredResponse = false
-	if !writeResponse(writer, http.StatusOK, response) {
-		writeResponse(writer, http.StatusOK, rejected(UnavailableReason))
+	responded = writeResponse(writer, http.StatusOK, response)
+	if !responded {
+		responded = writeResponse(writer, http.StatusOK, rejected(UnavailableReason))
+	}
+}
+
+type dispatchResult struct {
+	response frpplugin.Response
+	err      error
+}
+
+func (h *Handler) dispatch(parent context.Context, request frpplugin.Request) (frpplugin.Response, error) {
+	ctx, cancel := context.WithTimeout(parent, h.dispatchTimeout)
+	defer cancel()
+	resultChannel := make(chan dispatchResult, 1)
+	go func() {
+		var result dispatchResult
+		defer func() {
+			if recover() != nil {
+				result = dispatchResult{err: errors.New("frp plugin dispatcher panicked")}
+			}
+			resultChannel <- result
+		}()
+		result.response, result.err = h.dispatcher.Dispatch(ctx, request)
+	}()
+
+	select {
+	case result := <-resultChannel:
+		return result.response, result.err
+	case <-ctx.Done():
+		return frpplugin.Response{}, ctx.Err()
 	}
 }
 

@@ -43,6 +43,7 @@ func TestDecodeRequestRejectsAmbiguousOrUnknownEnvelopeFields(t *testing.T) {
 		body string
 	}{
 		{name: "duplicate operation", body: `{"version":"0.1.0","op":"Ping","op":"Login","content":{}}`},
+		{name: "case folded content", body: `{"version":"0.1.0","op":"Login","content":{},"Content":{}}`},
 		{name: "duplicate nested metadata", body: `{"version":"0.1.0","op":"Login","content":{"metas":{"nodelane_run_id":"first","nodelane_run_id":"second"}}}`},
 		{name: "unknown envelope field", body: `{"version":"0.1.0","op":"Login","content":{},"authorization":"secret"}`},
 	}
@@ -66,6 +67,7 @@ func TestDecodeRequestRejectsOversizedEnvelope(t *testing.T) {
 func TestDecodeContentRejectsUnknownAndDuplicateFields(t *testing.T) {
 	for _, content := range []string{
 		`{"user":"first","user":"second","metas":{}}`,
+		`{"USER":"account","metas":{}}`,
 		`{"user":"","metas":{},"account_access_token":"secret"}`,
 	} {
 		request := Request{Op: OpLogin, Content: []byte(content)}
@@ -73,6 +75,17 @@ func TestDecodeContentRejectsUnknownAndDuplicateFields(t *testing.T) {
 		if err := request.DecodeContent(&decoded); err == nil {
 			t.Fatalf("DecodeContent(%s) error = nil, want strict content rejection", content)
 		}
+	}
+}
+
+func TestDecodeContentPreservesCaseDistinctMapKeys(t *testing.T) {
+	request := Request{Op: OpLogin, Content: []byte(`{"metas":{"Token":"one","token":"two"}}`)}
+	var decoded LoginContent
+	if err := request.DecodeContent(&decoded); err != nil {
+		t.Fatalf("DecodeContent: %v", err)
+	}
+	if len(decoded.Metas) != 2 || decoded.Metas["Token"] != "one" || decoded.Metas["token"] != "two" {
+		t.Fatalf("metadata = %#v, want case-distinct map keys preserved", decoded.Metas)
 	}
 }
 

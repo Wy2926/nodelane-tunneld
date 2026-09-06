@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wy2926/nodelane-tunneld/internal/frpplugin"
 )
@@ -125,13 +126,54 @@ func TestHandlerRedactsDispatcherFailuresAndPanics(t *testing.T) {
 	}
 }
 
+func TestHandlerBoundsDispatchTimeAndCancelsDependencyContext(t *testing.T) {
+	dispatcher := &blockingDispatcher{canceled: make(chan struct{})}
+	handler, err := New(Options{Dispatcher: dispatcher, DispatchTimeout: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	started := time.Now()
+
+	handler.ServeHTTP(recorder, officialRequest(`{"version":"0.1.0","op":"Login","content":{}}`))
+
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("handler exceeded bounded dispatch time: %s", elapsed)
+	}
+	assertRejectedReason(t, recorder, UnavailableReason)
+	select {
+	case <-dispatcher.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("dispatcher did not receive context cancellation")
+	}
+}
+
+func TestHandlerRecoversResponseMarshalPanicWithGenericRejection(t *testing.T) {
+	dispatcher := &recordingDispatcher{response: frpplugin.Response{Content: panicJSONMarshaler{}}}
+	handler := mustHandler(t, dispatcher)
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, officialRequest(`{"version":"0.1.0","op":"Login","content":{}}`))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	assertRejectedReason(t, recorder, UnavailableReason)
+	if strings.Contains(recorder.Body.String(), "marshal-secret") {
+		t.Fatalf("response leaked marshal panic: %s", recorder.Body.String())
+	}
+}
+
 func TestHandlerRejectsNilDispatcher(t *testing.T) {
-	if handler, err := New(nil); handler != nil || !errors.Is(err, ErrInvalidConfiguration) {
+	if handler, err := New(Options{}); handler != nil || !errors.Is(err, ErrInvalidConfiguration) {
 		t.Fatalf("New(nil) = (%v, %v), want nil and ErrInvalidConfiguration", handler, err)
 	}
 	var typedNil *recordingDispatcher
-	if handler, err := New(typedNil); handler != nil || !errors.Is(err, ErrInvalidConfiguration) {
+	if handler, err := New(Options{Dispatcher: typedNil}); handler != nil || !errors.Is(err, ErrInvalidConfiguration) {
 		t.Fatalf("New(typed nil) = (%v, %v), want nil and ErrInvalidConfiguration", handler, err)
+	}
+	if handler, err := New(Options{Dispatcher: &recordingDispatcher{}, DispatchTimeout: -time.Second}); handler != nil || !errors.Is(err, ErrInvalidConfiguration) {
+		t.Fatalf("New(negative timeout) = (%v, %v), want nil and ErrInvalidConfiguration", handler, err)
 	}
 }
 
@@ -143,11 +185,25 @@ func officialRequest(body string) *http.Request {
 
 func mustHandler(t *testing.T, dispatcher Dispatcher) *Handler {
 	t.Helper()
-	handler, err := New(dispatcher)
+	handler, err := New(Options{Dispatcher: dispatcher})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return handler
+}
+
+type blockingDispatcher struct{ canceled chan struct{} }
+
+func (d *blockingDispatcher) Dispatch(ctx context.Context, _ frpplugin.Request) (frpplugin.Response, error) {
+	<-ctx.Done()
+	close(d.canceled)
+	return frpplugin.Response{}, ctx.Err()
+}
+
+type panicJSONMarshaler struct{}
+
+func (panicJSONMarshaler) MarshalJSON() ([]byte, error) {
+	panic("marshal-secret")
 }
 
 func assertRejectedReason(t *testing.T, recorder *httptest.ResponseRecorder, reason string) {
