@@ -52,9 +52,14 @@ func (p *pendingPipe) complete() error {
 }
 
 func (p *pendingPipe) close() {
-	if p.waiting {
+	if p.handle != 0 {
+		// Cancellation does not disconnect a pipe. Detach late clients before
+		// draining the connect, so their reads cannot depend on this teardown.
+		_ = windows.DisconnectNamedPipe(p.handle)
+	}
+	if p.waiting && errors.Is(p.complete(), windows.ERROR_IO_INCOMPLETE) {
 		// OVERLAPPED memory and its event must outlive the kernel's completion.
-		_ = windows.CancelIoEx(p.handle, &p.operation)
+		_ = windows.CancelIoEx(p.handle, nil)
 		var transferred uint32
 		_ = windows.GetOverlappedResult(p.handle, &p.operation, &transferred, true)
 		p.waiting = false
