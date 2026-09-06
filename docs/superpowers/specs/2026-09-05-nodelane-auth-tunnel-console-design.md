@@ -408,6 +408,7 @@ Redis 状态和默认限制：
 
 ### 9.3 非 Session 端点
 
+- `GET /api/v1/client-config`：只返回公开 frps 连接参数、公有 CA 和 Native OIDC 配置，不包含共享密钥或任何运行凭据。
 - `POST /api/v1/launch/redeem`
 - `POST /api/v1/anonymous/runs`
 - `POST /api/v1/runs/{id}/heartbeat`
@@ -473,6 +474,9 @@ nt launch <一次性启动码> localhost 3000
 - `nt launch` 只使用启动码，不读取或改变设备登录凭据。
 - 账号 Access Token 只发送到 `tunneld` API，绝不放入 frp metadata。
 - frp metadata 的业务授权只使用运行级凭据，不能携带账户 Token。运行凭据不能换取账户 Token，也不能启动第二条路由；原生 frp 握手认证不能代替 HTTP 插件中的逐运行授权。
+- 2026-09-06 确认：原版 frp 的 Token 同时决定控制流加密密钥，因此新模式双方使用空 `auth.token`，不再分发或桥接共享 Token。frps 强制 TLS，客户端验证 CA 和服务器名称；必须完整配置逐运行 HTTP 插件及有限应用心跳，配置遗漏或插件故障不能被视为已通过安全验收。上线前必须以真实 frps 验证有权连接可用、无权连接及插件故障被拒绝。
+- 工作连接必须独立证明归属：原版 frps 的 `NewWorkConn` metadata 来自已有控制会话，不是新连接提交的凭据。客户端使用官方 OIDC `TokenSource` 文件接口，将内存运行凭据放入 Login、Ping 和 NewWorkConn 的 `PrivilegeKey`；插件验证该直接凭据、会话绑定和权威状态后，才生成空原生 Token 的兼容校验值。不得仅凭继承 metadata 或公开校验值授权工作连接。
+- `TokenSource` 的文件接口不代表磁盘保存：Linux 使用只读封印的 memfd，Windows 使用限当前用户及当前进程的命名管道。运行凭据仍只在内存中，来源随运行结束关闭；不新增身份签发协议或 frps 补丁。上游代理协商目前无法可靠取消，新 CLI 在申请运行前拒绝非空 `NT_FRP_PROXY_URL`。
 - `Ctrl+C` 使用运行凭据调用停止接口，随后关闭本地 frpc；即使停止回报失败，本地进程也必须结束，服务端由心跳超时回收。
 
 Linux、PowerShell 和 CMD 启动器都必须接收并安全传递剩余参数。网页展示的精确命令字符串是验收对象，不能用另一个 shell 的等价命令替代。
@@ -579,7 +583,7 @@ HTTP/TCP 字节由原生实现通常在工作连接关闭时累计；长连接�
 - 启动码签发、兑换、匿名分配、登录回调和子域名检查均配置独立限流。
 - API 返回 `X-Request-ID`，错误 envelope 包含相同 ID。不建设访问或流量日志；必要的运行错误诊断只包含结果、稳定错误码和脱敏标识，不记录完整命令、请求内容或访客 IP 历史。
 - 真实来源 IP 只信任配置中的反向代理网段。Cloudflare 链路使用 `CF-Connecting-IP` 恢复入口地址，并显式向上游发送 `X-Real-IP`；上线验收读取实际 `nginx -T` 并发起真实请求。
-- 先前在沟通中暴露的 Resend Key 必须撤销后重新生成。历史上暴露过的 frps 凭据也必须轮换并同步 `FRP_AUTH_TOKEN`，不能复用旧值。
+- 先前在沟通中暴露的 Resend Key 必须撤销后重新生成。历史 frps 共享凭据必须退出使用；新模式不接受非空 `FRP_AUTH_TOKEN`，不能复用旧值或把它下发给客户端。
 
 ## 14. 故障降级
 
@@ -605,7 +609,8 @@ HTTP/TCP 字节由原生实现通常在工作连接关闭时累计；长连接�
 | frp | `v0.70.0` / `7b6e01f04f286632f0d23715aa17a3bc41234b5c` | 原版唯一数据面、原生管理 API 与服务端带宽限制 | HTTP 插件、配置和管理 API 薄适配；不维护源码补丁 |
 | go-oidc | `v3.21.0` / `c914bd380327a5a3a81403774d1a5d5b73772ce7` | BFF OIDC Discovery、ID Token/JWKS 校验 | 薄适配层 |
 | `golang.org/x/oauth2` | `v0.36.0` / `4d954e69a88d9e1ccb8439f8d5b6cbef230c4ef9` | Web OAuth 与 `nt` Device Flow | 薄适配层 |
-| go-keyring | `v0.2.8` / `2fb288e584191da8306e42b9f86a697742fca71e` | Windows Credential Manager、Linux Secret Service | 凭据存储抽象与受控文件回退 |
+| go-keyring | `v0.2.8` / `a8cdfe320cc8bc0534c895a648dc9214715a9da5` | Windows Credential Manager、Linux Secret Service | 凭据存储抽象与受控文件回退 |
+| go-winio | `v0.6.2` / `3c9576c9346a1892dee136329e7e15309e82fb4f` | Windows 可取消命名管道 I/O | 内存运行凭据源，不写凭据文件 |
 | Resend | 托管服务 | Logto SMTP Connector | 域名、Key、发件人和投递监控 |
 
 每次升级单独提交，先在集成环境验证 OIDC 回调、Device Flow、frps 插件、管理 API 字段与统计口径、数据库迁移，再允许进入生产。上游官方扩展点不能满足需求时必须先沟通，不自行改为维护补丁。
@@ -693,7 +698,7 @@ HTTP/TCP 字节由原生实现通常在工作连接关闭时累计；长连接�
 
 - **AC-SEC-01**：前端构建产物、数据库明文字段、Redis 可读值、日志、指标和三平台命令经过秘密扫描；除用户主动生成的 10 分钟启动码外，不包含禁止的凭据，且启动码不进入访问日志或遥测。
 - **AC-SEC-02**：CSRF、跨 Origin、非法重放、过期码、伪造账号、资源枚举和并发竞态测试全部失败关闭；过期但未物理清理的凭据仍不可续租，只有 nonce 而无当前有效认证不能读取重放结果。
-- **AC-SEC-03**：上线前确认旧 Resend Key 和历史暴露的 frps Token 已撤销，新值只存在于密钥管理或部署环境。
+- **AC-SEC-03**：上线前确认旧 Resend Key 已撤销，新值只存在于密钥管理或部署环境；历史 frps Token 已退出使用，新模式双方空 Token、强制 TLS 和完整插件授权通过真实握手及拒绝测试。
 - **AC-SEC-04**：通过实际入口配置确认通配隧道未继承会保存 URL 或访客 IP 的访问日志；不以“没有应用日志表”代替入口日志检查。认证回调、启动码与管理接口的敏感数据也不能进入入口日志。
 - **AC-OPS-01**：空数据库执行全部 Goose migration 成功；重复检查显示无待执行迁移；服务不会在启动时执行删库。
 - **AC-OPS-02**：备份恢复演练证明可以整套回退到旧镜像与旧数据库，而非尝试数据降级。
@@ -770,7 +775,7 @@ HTTP/TCP 字节由原生实现通常在工作连接关闭时累计；长连接�
 - Logto Web 应用 Client Secret
 - Tunnel Session、启动码哈希和运行凭据哈希所需的独立随机密钥
 - Session、注册启动幂等结果与匿名启动幂等结果各自分离用途的 AEAD 加密密钥
-- 轮换后的 frps `FRP_AUTH_TOKEN`
+- frps 强制 TLS 所需证书及供客户端验证的公有 CA；不再配置共享 `FRP_AUTH_TOKEN`
 - Logto 与 Tunnel 两套独立 PostgreSQL DSN
 - Redis 连接信息
 - `auth.nodelane.net` 证书、DNS 与可信代理配置

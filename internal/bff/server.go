@@ -58,6 +58,7 @@ type Options struct {
 	PublicOrigin string
 	Provider     OIDCProvider
 	Sessions     SessionStore
+	LogoutReader SessionReader
 	Accounts     AccountStore
 	Now          func() time.Time
 	Random       io.Reader
@@ -67,6 +68,7 @@ type Server struct {
 	publicOrigin string
 	provider     OIDCProvider
 	sessions     SessionStore
+	logoutReader SessionReader
 	accounts     AccountStore
 	now          func() time.Time
 	random       io.Reader
@@ -82,9 +84,13 @@ func New(options Options) (*Server, error) {
 	if now == nil {
 		now = time.Now
 	}
+	logoutReader := options.LogoutReader
+	if logoutReader == nil {
+		logoutReader = options.Sessions
+	}
 	return &Server{
 		publicOrigin: strings.TrimSuffix(options.PublicOrigin, "/"),
-		provider:     options.Provider, sessions: options.Sessions, accounts: options.Accounts,
+		provider:     options.Provider, sessions: options.Sessions, logoutReader: logoutReader, accounts: options.Accounts,
 		now: now, random: options.Random,
 	}, nil
 }
@@ -353,7 +359,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	record, err := s.sessions.ReadSession(r.Context(), cookie.Value)
+	record, err := s.logoutReader.ReadSession(r.Context(), cookie.Value)
 	if err != nil {
 		s.writeDependencyError(w, err)
 		return
