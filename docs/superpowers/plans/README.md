@@ -32,21 +32,11 @@ This index coordinates the independently executable phase plans required by sect
 
 `SCOPE-01` and `SCOPE-02` bind every phase. The acceptance mapping assigns ownership; an overlapping ID still needs one complete end-to-end evidence record.
 
-## Local Delivery Status
+## Data-Layer References
 
-| Phase | Local Evidence | Remaining Acceptance |
-| --- | --- | --- |
-| Identity deployment | Local auth main at `a22e375`; offline configuration/contract checks passed, 80 tests | Real Resend, Google, SSO, Device Flow, and deployment remain unverified |
-| Persistent domain | [Foundation](2026-09-05-control-domain-foundation.md) and [persistence](2026-09-05-control-persistence.md) implemented; reviewed data layer fast-forwarded into local main at `fe46d4d`, with real-PostgreSQL regressions repeated before and after merge | Library is not wired into legacy server/API; no production database initialized |
-| BFF/API and later phases | Separate phase plans remain the next work | Runtime integration, CLI/UI, native statistics, staging and production |
-
-The [local persistence validation record](../validation/2026-09-05-control-persistence.md) includes exact commands, the Linux `TERM=dumb` prerequisite, the inherited headless CLI limitation, and the boundary between local evidence and live acceptance.
-
-## First Executable Plan
-
-The first phase plan is `D:/Project/nodelane/auth/docs/superpowers/plans/2026-09-05-logto-bootstrap.md`. All paths inside it are relative to the auth project root unless explicitly stated otherwise.
-
-The user approved the product spec, isolated worktrees, and the local auth and Tunnel data-layer main merges. Further implementation continues in an isolated worktree. Remote publication and deployment have not been authorized.
+- [Foundation](2026-09-05-control-domain-foundation.md)
+- [Persistence](2026-09-05-control-persistence.md)
+- [Local persistence validation](../validation/2026-09-05-control-persistence.md), including the Linux `TERM=dumb` prerequisite and the boundary between local tests and live acceptance.
 
 ## Execution and Evidence
 
