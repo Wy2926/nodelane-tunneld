@@ -296,16 +296,31 @@ func (s *Server) writeAnonymousError(w http.ResponseWriter, err error) {
 	case errors.Is(err, anonymous.ErrIdempotencyConflict):
 		status, code = http.StatusConflict, "idempotency_conflict"
 	case errors.Is(err, anonymous.ErrInstallationLimit), errors.Is(err, anonymous.ErrNetworkLimit):
-		status, code = http.StatusConflict, "anonymous_run_limit_reached"
+		var limited *anonymous.ConcurrencyLimitError
+		if errors.As(err, &limited) && limited != nil && validLimit(limited.Scope, limited.RetryAfter) {
+			status, code = http.StatusTooManyRequests, "anonymous_"+string(limited.Scope)+"_concurrency_limited"
+			setRetryAfter(w, limited.RetryAfter)
+		}
 	case errors.Is(err, anonymous.ErrRateLimited):
 		var limited *anonymous.RateLimitError
-		if errors.As(err, &limited) && limited.RetryAfter > 0 {
-			status, code = http.StatusTooManyRequests, "rate_limited"
-			seconds := int64((limited.RetryAfter + time.Second - 1) / time.Second)
-			w.Header().Set("Retry-After", strconv.FormatInt(max(seconds, 1), 10))
+		if errors.As(err, &limited) && limited != nil && validLimit(limited.Scope, limited.RetryAfter) {
+			status, code = http.StatusTooManyRequests, "anonymous_"+string(limited.Scope)+"_rate_limited"
+			setRetryAfter(w, limited.RetryAfter)
 		}
 	}
 	s.writeError(w, status, code)
+}
+
+func validLimit(scope anonymous.LimitScope, retry time.Duration) bool {
+	return retry > 0 && (scope == anonymous.LimitInstallation || scope == anonymous.LimitNetwork)
+}
+
+func setRetryAfter(w http.ResponseWriter, retry time.Duration) {
+	seconds := int64(retry / time.Second)
+	if retry%time.Second != 0 {
+		seconds++
+	}
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
 }
 
 type errorEnvelope struct {
@@ -336,12 +351,16 @@ func errorMessage(code string) string {
 		return "This network is not allowed."
 	case "idempotency_conflict":
 		return "The idempotency key was already used for another request."
-	case "anonymous_run_limit_reached":
-		return "The anonymous run limit has been reached."
+	case "anonymous_installation_concurrency_limited":
+		return "This installation already has an active anonymous run."
+	case "anonymous_network_concurrency_limited":
+		return "This network has reached its active anonymous run limit."
+	case "anonymous_installation_rate_limited":
+		return "This installation has started too many anonymous runs."
+	case "anonymous_network_rate_limited":
+		return "This network has started too many anonymous runs."
 	case "run_stopped":
 		return "The run is no longer active."
-	case "rate_limited":
-		return "Too many requests."
 	default:
 		return "A required dependency is unavailable."
 	}
