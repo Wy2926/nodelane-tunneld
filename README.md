@@ -8,6 +8,11 @@ This is a breaking-version codebase. Use a new Tunnel PostgreSQL database
 and Redis namespace. There is no old API, data import, dual write, or upgrade
 compatibility. Startup refuses an incompatible schema and never deletes it.
 
+Current cross-repository progress, known gaps, and the next authorized work are
+recorded in [the development handoff](docs/HANDOFF.md). The
+[approved specification](docs/superpowers/specs/2026-09-05-nodelane-auth-tunnel-console-design.md)
+defines requirements, not a claim that deployment or every acceptance check is complete.
+
 ## Use
 
 The Tunnel console is served at `/console/tunnels`. It supports route
@@ -139,6 +144,7 @@ they never fall back to production environment variables.
 The Go binary embeds committed `internal/server/assets/web` output from
 `web/dist`; rebuild and synchronize it after frontend changes. Console HTML
 is read only after Session authorization; internal shell URLs are not public.
+Run `pnpm --dir web test:embedded` after synchronization to verify exact bytes.
 
 Core boundaries are `controlserver` (composition), `controlapi` / `bff`
 (HTTP), `store` / `anonymous` (authority), `frpauth` / `frpanonymous`
