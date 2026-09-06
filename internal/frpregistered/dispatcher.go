@@ -36,6 +36,8 @@ type Dispatcher struct {
 	authorizer Authorizer
 }
 
+var _ Authorizer = (*frpauth.Authorizer)(nil)
+
 func New(authorizer Authorizer) (*Dispatcher, error) {
 	if nilAuthorizer(authorizer) {
 		return nil, ErrInvalidConfiguration
