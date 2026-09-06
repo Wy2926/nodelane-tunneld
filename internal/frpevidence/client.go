@@ -152,6 +152,31 @@ type nativePage struct {
 	Items    []nativeProxy `json:"items"`
 }
 
+type jsonShape struct {
+	fields map[string]*jsonShape
+	item   *jsonShape
+}
+
+// These shapes cover only fields decoded by the native structs above. Unknown
+// fields, including native annotations and metadatas maps, stay case-sensitive.
+var (
+	proxyJSONShape = &jsonShape{fields: map[string]*jsonShape{
+		"name": nil, "clientID": nil,
+		"spec":   {fields: map[string]*jsonShape{"type": nil}},
+		"status": {fields: map[string]*jsonShape{"phase": nil, "curConns": nil}},
+	}}
+	detailJSONShape = &jsonShape{fields: map[string]*jsonShape{
+		"code": nil, "data": proxyJSONShape,
+	}}
+	listJSONShape = &jsonShape{fields: map[string]*jsonShape{
+		"code": nil,
+		"data": {fields: map[string]*jsonShape{
+			"total": nil, "page": nil, "pageSize": nil,
+			"items": {item: proxyJSONShape},
+		}},
+	}}
+)
+
 func (c *Client) Observe(ctx context.Context, expected Expected) Evidence {
 	result := Evidence{Availability: Unavailable}
 	if !validExpected(expected) {
@@ -159,7 +184,7 @@ func (c *Client) Observe(ctx context.Context, expected Expected) Evidence {
 	}
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	envelope, availability := c.get(ctx, "/api/v2/proxies/"+expected.ProxyName, "", detailMaxBytes)
+	envelope, availability := c.get(ctx, "/api/v2/proxies/"+expected.ProxyName, "", detailMaxBytes, detailJSONShape)
 	if availability != Available {
 		return Evidence{Availability: availability}
 	}
@@ -184,7 +209,7 @@ func (c *Client) ListAnonymous(ctx context.Context) Inventory {
 		previousTotal := -1
 		for page := 1; ; page++ {
 			query := url.Values{"type": {protocol}, "page": {strconv.Itoa(page)}, "pageSize": {strconv.Itoa(listPageSize)}}
-			envelope, availability := c.get(ctx, "/api/v2/proxies", query.Encode(), listMaxBytes)
+			envelope, availability := c.get(ctx, "/api/v2/proxies", query.Encode(), listMaxBytes, listJSONShape)
 			if availability != Available {
 				return failed
 			}
@@ -234,7 +259,7 @@ func (c *Client) ListAnonymous(ctx context.Context) Inventory {
 	return result
 }
 
-func (c *Client) get(ctx context.Context, path, query string, maxBytes int64) (nativeEnvelope, Availability) {
+func (c *Client) get(ctx context.Context, path, query string, maxBytes int64, shape *jsonShape) (nativeEnvelope, Availability) {
 	var envelope nativeEnvelope
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+path, nil)
 	if err != nil {
@@ -253,7 +278,7 @@ func (c *Client) get(ctx context.Context, path, query string, maxBytes int64) (n
 		return envelope, Unavailable
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxBytes+1))
-	if err != nil || int64(len(body)) > maxBytes || !unambiguousJSON(body) || json.Unmarshal(body, &envelope) != nil || envelope.Code != response.StatusCode {
+	if err != nil || int64(len(body)) > maxBytes || !unambiguousJSON(body, shape) || json.Unmarshal(body, &envelope) != nil || envelope.Code != response.StatusCode {
 		return envelope, Unavailable
 	}
 	if response.StatusCode == http.StatusNotFound {
@@ -265,17 +290,17 @@ func (c *Client) get(ctx context.Context, path, query string, maxBytes int64) (n
 	return envelope, Available
 }
 
-func unambiguousJSON(body []byte) bool {
+func unambiguousJSON(body []byte, shape *jsonShape) bool {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
-	if !unambiguousValue(decoder, 0) {
+	if !unambiguousValue(decoder, shape, 0) {
 		return false
 	}
 	_, err := decoder.Token()
 	return err == io.EOF
 }
 
-func unambiguousValue(decoder *json.Decoder, depth int) bool {
+func unambiguousValue(decoder *json.Decoder, shape *jsonShape, depth int) bool {
 	if depth > 32 {
 		return false
 	}
@@ -296,16 +321,19 @@ func unambiguousValue(decoder *json.Decoder, depth int) bool {
 			if err != nil || !ok {
 				return false
 			}
-			// encoding/json also matches struct field names case-insensitively.
-			key = strings.ToLower(key)
-			if seen[key] || !unambiguousValue(decoder, depth+1) {
+			childShape, canonical := jsonFieldShape(shape, key)
+			if seen[key] || !canonical || !unambiguousValue(decoder, childShape, depth+1) {
 				return false
 			}
 			seen[key] = true
 		}
 	case '[':
+		var itemShape *jsonShape
+		if shape != nil {
+			itemShape = shape.item
+		}
 		for decoder.More() {
-			if !unambiguousValue(decoder, depth+1) {
+			if !unambiguousValue(decoder, itemShape, depth+1) {
 				return false
 			}
 		}
@@ -314,6 +342,23 @@ func unambiguousValue(decoder *json.Decoder, depth int) bool {
 	}
 	closing, err := decoder.Token()
 	return err == nil && ((delimiter == '{' && closing == json.Delim('}')) || (delimiter == '[' && closing == json.Delim(']')))
+}
+
+func jsonFieldShape(shape *jsonShape, key string) (*jsonShape, bool) {
+	if shape == nil {
+		return nil, true
+	}
+	if child, known := shape.fields[key]; known {
+		return child, true
+	}
+	// EqualFold matches encoding/json's Unicode folding. Compare against only
+	// the fixed consumed fields, never every other key in an arbitrary object.
+	for field := range shape.fields {
+		if strings.EqualFold(field, key) {
+			return nil, false
+		}
+	}
+	return nil, true
 }
 
 func (p nativeProxy) valid(protocol string) bool {

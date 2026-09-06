@@ -291,6 +291,8 @@ func TestObserveRejectsMalformedOrAmbiguousJSON(t *testing.T) {
 		{name: "duplicate phase", status: 200, contentType: "application/json", body: strings.Replace(valid, `"phase":"online"`, `"phase":"online","phase":"offline"`, 1)},
 		{name: "duplicate envelope code", status: 200, contentType: "application/json", body: strings.Replace(valid, `"code":200`, `"code":500,"code":200`, 1)},
 		{name: "case alias", status: 200, contentType: "application/json", body: strings.Replace(valid, `"phase":"online"`, `"phase":"online","Phase":"offline"`, 1)},
+		{name: "unicode phase alias", status: 200, contentType: "application/json", body: strings.Replace(valid, `"phase":"online"`, `"phase":"online","pha\u017fe":"offline"`, 1)},
+		{name: "unicode connections alias", status: 200, contentType: "application/json", body: strings.Replace(valid, `"curConns":1`, `"curConns":1,"curConn\u017f":0`, 1)},
 		{name: "html 404", status: 404, contentType: "text/html", body: "not found"},
 		{name: "wrong 404 envelope", status: 404, contentType: "application/json", body: `{"code":200,"data":null}`},
 		{name: "404 has data", status: 404, contentType: "application/json", body: `{"code":404,"data":{}}`},
@@ -307,6 +309,66 @@ func TestObserveRejectsMalformedOrAmbiguousJSON(t *testing.T) {
 				t.Fatalf("ambiguous response produced evidence: %#v", got)
 			}
 		})
+	}
+}
+
+func TestListAnonymousRejectsUnicodeFieldAliases(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("type") != "http" {
+			writeList(t, w, 0, 1, 200, []any{})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"code":200,"data":{"total":1,"page":1,"pageSize":200,"items":[{"name":%q,"clientID":%q,"spec":{"type":"http"},"status":{"phase":"online","pha\u017fe":"offline","curConns":7,"curConn\u017f":0}}]}}`, anonymousProxyA, anonymousRunA)
+	}))
+	defer server.Close()
+	got := newTestClient(t, server).ListAnonymous(context.Background())
+	if got.Availability != frpevidence.Unavailable || got.Proxies != nil {
+		t.Fatalf("Unicode aliases fabricated an offline inventory: %#v", got)
+	}
+}
+
+func TestObserveAllowsCaseSensitiveIgnoredNativeMaps(t *testing.T) {
+	server := httptest.NewServer(frphttp.MakeHTTPHandlerFuncV2(func(*frphttp.Context) (any, error) {
+		return proxyWithCaseSensitiveMaps(registeredProxy, registeredRun), nil
+	}))
+	defer server.Close()
+	got := newTestClient(t, server).Observe(context.Background(), frpevidence.Expected{ProxyName: registeredProxy, RunID: registeredRun, Protocol: "http"})
+	want := frpevidence.Evidence{Availability: frpevidence.Available, ProxyName: registeredProxy, RunID: registeredRun, Protocol: "http", Phase: "online", CurrentConnections: 3}
+	if got != want {
+		t.Fatalf("valid native case-sensitive maps rejected: %#v", got)
+	}
+}
+
+func TestListAnonymousAllowsCaseSensitiveIgnoredNativeMaps(t *testing.T) {
+	server := httptest.NewServer(frphttp.MakeHTTPHandlerFuncV2(func(ctx *frphttp.Context) (any, error) {
+		items := []frpmodel.V2ProxyResp{}
+		if ctx.Req.URL.Query().Get("type") == "http" {
+			items = []frpmodel.V2ProxyResp{
+				proxyWithCaseSensitiveMaps(anonymousProxyA, anonymousRunA),
+				proxyWithCaseSensitiveMaps("other-proxy", "other-client"),
+			}
+		}
+		return frpmodel.V2PageResp[frpmodel.V2ProxyResp]{Total: len(items), Page: 1, PageSize: 200, Items: items}, nil
+	}))
+	defer server.Close()
+	got := newTestClient(t, server).ListAnonymous(context.Background())
+	want := []frpevidence.Evidence{{Availability: frpevidence.Available, ProxyName: anonymousProxyA, RunID: anonymousRunA, Protocol: "http", Phase: "online", CurrentConnections: 3}}
+	if got.Availability != frpevidence.Available || !reflect.DeepEqual(got.Proxies, want) {
+		t.Fatalf("valid native case-sensitive maps rejected in inventory: %#v", got)
+	}
+}
+
+func proxyWithCaseSensitiveMaps(name, runID string) frpmodel.V2ProxyResp {
+	return frpmodel.V2ProxyResp{
+		Name: name, ClientID: runID,
+		Spec: frpmodel.V2ProxySpec{Type: "http", HTTP: &frpmodel.V2HTTPProxySpec{
+			V2ProxyBaseSpec: frpmodel.V2ProxyBaseSpec{
+				Annotations: map[string]string{"FOO": "upper", "foo": "lower"},
+				Metadatas:   map[string]string{"phase": "online", "Phase": "offline", "pha\u017fe": "custom"},
+			},
+		}},
+		Status: frpmodel.V2ProxyStatusResp{State: "online", CurConns: 3},
 	}
 }
 
