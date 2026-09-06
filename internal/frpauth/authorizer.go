@@ -10,6 +10,7 @@ import (
 
 	"github.com/Wy2926/nodelane-tunneld/internal/domain"
 	"github.com/Wy2926/nodelane-tunneld/internal/frpplugin"
+	configtypes "github.com/fatedier/frp/pkg/config/types"
 )
 
 const (
@@ -38,6 +39,10 @@ func New(repository Repository, bandwidthLimit string) (*Authorizer, error) {
 		len(bandwidthLimit) > 64 || strings.ContainsAny(bandwidthLimit, "\x00\r\n") {
 		return nil, ErrInvalidConfiguration
 	}
+	quantity, err := configtypes.NewBandwidthQuantity(bandwidthLimit)
+	if err != nil || quantity.Bytes() <= 0 {
+		return nil, ErrInvalidConfiguration
+	}
 	return &Authorizer{repository: repository, bandwidthLimit: bandwidthLimit}, nil
 }
 
@@ -54,15 +59,17 @@ func nilRepository(repository Repository) bool {
 	}
 }
 
-func (a *Authorizer) Login(ctx context.Context, content frpplugin.LoginContent) (domain.RunAuthorization, error) {
+func (a *Authorizer) Login(ctx context.Context, content frpplugin.LoginContent) (frpplugin.LoginContent, domain.RunAuthorization, error) {
 	authorization, err := a.authorize(ctx, content.Metas)
 	if err != nil {
-		return domain.RunAuthorization{}, err
+		return frpplugin.LoginContent{}, domain.RunAuthorization{}, err
 	}
 	if content.User != "" {
-		return domain.RunAuthorization{}, ErrInvalidCredential
+		return frpplugin.LoginContent{}, domain.RunAuthorization{}, ErrInvalidCredential
 	}
-	return authorization, nil
+	content.RunID = authorization.Run.ID
+	content.ClientID = authorization.Run.ID
+	return content, authorization, nil
 }
 
 func (a *Authorizer) NewProxy(ctx context.Context, content frpplugin.NewProxyContent) (frpplugin.NewProxyContent, domain.RunAuthorization, error) {

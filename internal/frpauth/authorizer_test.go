@@ -61,7 +61,7 @@ func TestEveryRegisteredCallbackReauthorizesItsRunProof(t *testing.T) {
 		call func() error
 	}{
 		{"Login", func() error {
-			_, err := authorizer.Login(context.Background(), frpplugin.LoginContent{Metas: testMetas()})
+			_, _, err := authorizer.Login(context.Background(), frpplugin.LoginContent{Metas: testMetas()})
 			return err
 		}},
 		{"NewProxy", func() error {
@@ -127,9 +127,12 @@ func TestCredentialMetadataIsAnExactTwoFieldContract(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			repository := &recordingRepository{authorization: testAuthorization()}
 			authorizer := newTestAuthorizer(t, repository)
-			_, err := authorizer.Login(context.Background(), frpplugin.LoginContent{Metas: test.metas})
+			content, authorization, err := authorizer.Login(context.Background(), frpplugin.LoginContent{Metas: test.metas})
 			if !errors.Is(err, ErrInvalidCredential) {
 				t.Fatalf("Login error = %v, want ErrInvalidCredential", err)
+			}
+			if !reflect.DeepEqual(content, frpplugin.LoginContent{}) || authorization != (domain.RunAuthorization{}) {
+				t.Fatalf("rejected Login returned content/authorization: %#v %#v", content, authorization)
 			}
 			if len(repository.proofs) != 0 {
 				t.Fatalf("AuthorizeRun called with rejected metadata: %#v", repository.proofs)
@@ -175,7 +178,7 @@ func TestStoppedRunIsRejectedByEveryRegisteredCallback(t *testing.T) {
 		call func() error
 	}{
 		{"Login", func() error {
-			_, err := authorizer.Login(context.Background(), frpplugin.LoginContent{Metas: testMetas()})
+			_, _, err := authorizer.Login(context.Background(), frpplugin.LoginContent{Metas: testMetas()})
 			return err
 		}},
 		{"NewProxy", func() error {
@@ -334,6 +337,12 @@ func TestNewRejectsMissingDependenciesAndUnsafeBandwidth(t *testing.T) {
 		{"blank bandwidth", repository, ""},
 		{"padded bandwidth", repository, " 5MB"},
 		{"control character", repository, "5MB\nother"},
+		{"zero bandwidth", repository, "0MB"},
+		{"negative bandwidth", repository, "-1MB"},
+		{"NaN bandwidth", repository, "NaNMB"},
+		{"infinite bandwidth", repository, "InfMB"},
+		{"unsupported unit", repository, "5GB"},
+		{"overflow", repository, "9223372036854775807MB"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got, err := New(test.repository, test.bandwidth); got != nil || !errors.Is(err, ErrInvalidConfiguration) {
@@ -359,10 +368,83 @@ func TestRepositoryCannotAuthorizeADifferentRunOrRoute(t *testing.T) {
 			authorization := testAuthorization()
 			test.mutate(&authorization)
 			repository := &recordingRepository{authorization: authorization}
-			_, err := newTestAuthorizer(t, repository).Login(context.Background(), frpplugin.LoginContent{Metas: testMetas()})
+			_, _, err := newTestAuthorizer(t, repository).Login(context.Background(), frpplugin.LoginContent{Metas: testMetas()})
 			if !errors.Is(err, ErrDependencyUnavailable) {
 				t.Fatalf("error = %v, want ErrDependencyUnavailable", err)
 			}
 		})
+	}
+}
+
+func TestLoginNormalizesFRPIdentityToTheAuthorizedRun(t *testing.T) {
+	tests := []struct {
+		name     string
+		runID    string
+		clientID string
+	}{
+		{"first connection has no frps identity", "", ""},
+		{"reconnect cannot forge another identity", "forged-frps-run", "forged-client"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := &recordingRepository{authorization: testAuthorization()}
+			authorizer := newTestAuthorizer(t, repository)
+			metas := testMetas()
+			input := frpplugin.LoginContent{
+				Version: "0.70.0", Hostname: "client-host", RunID: test.runID, ClientID: test.clientID, Metas: metas,
+			}
+
+			output, authorization, err := authorizer.Login(context.Background(), input)
+			if err != nil {
+				t.Fatalf("Login: %v", err)
+			}
+			if output.RunID != testRunID || output.ClientID != testRunID {
+				t.Fatalf("normalized identity = run_id %q client_id %q", output.RunID, output.ClientID)
+			}
+			if output.Version != input.Version || output.Hostname != input.Hostname {
+				t.Fatalf("non-identity Login fields changed: %#v", output)
+			}
+			if !reflect.DeepEqual(output.Metas, metas) {
+				t.Fatalf("credential metadata was not preserved: %#v", output.Metas)
+			}
+			if authorization.Run.ID != testRunID || authorization.Route.ID != testRouteID {
+				t.Fatalf("authorization = %#v", authorization)
+			}
+			if len(repository.proofs) != 1 || repository.proofs[0] != (domain.RunProof{RunID: testRunID, Token: testRunToken}) {
+				t.Fatalf("AuthorizeRun proofs = %#v", repository.proofs)
+			}
+		})
+	}
+}
+
+func TestLoginErrorsNeverReturnModifiedContent(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		metas map[string]string
+		err   error
+	}{
+		{"invalid metadata", map[string]string{MetadataRunID: testRunID}, nil},
+		{"stopped", testMetas(), domain.ErrRunStopped},
+		{"dependency failure", testMetas(), errors.New("database unavailable")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := &recordingRepository{authorization: testAuthorization(), err: test.err}
+			content, authorization, err := newTestAuthorizer(t, repository).Login(context.Background(), frpplugin.LoginContent{
+				RunID: "attacker-run", ClientID: "attacker-client", Metas: test.metas,
+			})
+			if err == nil {
+				t.Fatal("Login unexpectedly succeeded")
+			}
+			if !reflect.DeepEqual(content, frpplugin.LoginContent{}) || authorization != (domain.RunAuthorization{}) {
+				t.Fatalf("failed Login returned content/authorization: %#v %#v", content, authorization)
+			}
+		})
+	}
+}
+
+func TestNewAcceptsPositiveFRPBandwidth(t *testing.T) {
+	if authorizer, err := New(&recordingRepository{}, "5MB"); err != nil || authorizer == nil {
+		t.Fatalf("New(5MB) = %#v, %v", authorizer, err)
 	}
 }
