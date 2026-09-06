@@ -2,6 +2,139 @@ package anonymous
 
 import "github.com/redis/go-redis/v9"
 
+var observeResourceFenceScript = redis.NewScript(`
+local info = redis.call('INFO', 'server')
+local run_id = string.match(info, 'run_id:([0-9a-f]+)')
+if not run_id then return {-1, '', '', '0'} end
+local marker_type = redis.call('TYPE', KEYS[1]).ok
+if marker_type == 'none' then return {1, run_id, '', '0'} end
+if marker_type ~= 'hash' then return {-1, run_id, '', '0'} end
+local revision = redis.call('HGET', KEYS[1], 'revision') or ''
+local generation = redis.call('HGET', KEYS[1], 'generation') or '0'
+local owner_hash = redis.call('HGET', KEYS[1], 'owner_hash') or ''
+local node_run_id = redis.call('HGET', KEYS[1], 'node_run_id') or ''
+local state = redis.call('HGET', KEYS[1], 'state') or ''
+if state ~= 'ready' and state ~= 'blocked' then return {-1, run_id, revision, generation} end
+if revision == '' then
+  if owner_hash ~= '' then return {-1, run_id, revision, generation} end
+else
+  if owner_hash == '' or node_run_id == '' then return {-1, run_id, revision, generation} end
+end
+return {1, run_id, revision, generation}
+`)
+
+var markResourcesVerifiedScript = redis.NewScript(`
+local info = redis.call('INFO', 'server')
+local run_id = string.match(info, 'run_id:([0-9a-f]+)')
+if not run_id or run_id ~= ARGV[1] then return {-1, run_id or ''} end
+local marker_type = redis.call('TYPE', KEYS[1]).ok
+if marker_type ~= 'none' and marker_type ~= 'hash' then return {-3, run_id} end
+local current_revision = ''
+local current_owner = ''
+local current_generation = '0'
+if marker_type == 'hash' then
+  current_revision = redis.call('HGET', KEYS[1], 'revision') or ''
+  current_owner = redis.call('HGET', KEYS[1], 'owner_hash') or ''
+  current_generation = redis.call('HGET', KEYS[1], 'generation') or '0'
+end
+if current_revision ~= ARGV[2] or current_generation ~= ARGV[5] then return {-2, run_id} end
+if current_owner ~= '' and current_owner ~= ARGV[3] then return {-3, run_id} end
+if current_revision ~= '' and current_owner == '' then return {-3, run_id} end
+redis.call('HSET', KEYS[1],
+  'node_run_id', run_id,
+  'owner_hash', ARGV[3],
+  'revision', ARGV[4],
+  'generation', current_generation,
+  'state', 'ready')
+return {1, run_id}
+`)
+
+var blockAllocationsScript = redis.NewScript(`
+local info = redis.call('INFO', 'server')
+local run_id = string.match(info, 'run_id:([0-9a-f]+)')
+if not run_id then return {-1} end
+local marker_type = redis.call('TYPE', KEYS[1]).ok
+if marker_type ~= 'none' and marker_type ~= 'hash' then return {-1} end
+if marker_type == 'none' then
+  redis.call('HSET', KEYS[1], 'node_run_id', run_id, 'state', 'blocked')
+else
+  if not redis.call('HGET', KEYS[1], 'node_run_id') then
+    redis.call('HSET', KEYS[1], 'node_run_id', run_id)
+  end
+  redis.call('HSET', KEYS[1], 'state', 'blocked')
+end
+redis.call('HINCRBY', KEYS[1], 'generation', 1)
+return {1}
+`)
+
+var lookupReplayScript = redis.NewScript(`
+local now = tonumber(ARGV[1])
+local info = redis.call('INFO', 'server')
+local node_run_id = string.match(info, 'run_id:([0-9a-f]+)')
+if not node_run_id or redis.call('HGET', KEYS[1], 'state') ~= 'ready' or
+   redis.call('HGET', KEYS[1], 'node_run_id') ~= node_run_id or
+   not redis.call('HGET', KEYS[1], 'owner_hash') or not redis.call('HGET', KEYS[1], 'revision') then
+  return {-1}
+end
+if redis.call('EXISTS', KEYS[2]) == 0 then
+  return {0}
+end
+local stored_hash = redis.call('HGET', KEYS[2], 'request_hash')
+if not stored_hash or stored_hash ~= ARGV[2] then
+  return {-2}
+end
+local stored_run_key = redis.call('HGET', KEYS[2], 'run_key')
+local stored_run_id = redis.call('HGET', KEYS[2], 'run_id')
+local stored_expires = tonumber(redis.call('HGET', KEYS[2], 'expires_at'))
+local stored_ciphertext = redis.call('HGET', KEYS[2], 'ciphertext')
+if not stored_run_key or string.len(stored_run_key) ~= string.len(ARGV[3]) + 64 or
+   string.sub(stored_run_key, 1, string.len(ARGV[3])) ~= ARGV[3] or
+   not stored_run_id or not stored_expires or not stored_ciphertext then
+  return {-8}
+end
+if redis.call('HGET', stored_run_key, 'run_id') ~= stored_run_id or redis.call('HGET', stored_run_key, 'replay_key') ~= KEYS[2] then
+  return {-10}
+end
+if now >= stored_expires then return {-9} end
+local state = redis.call('HGET', stored_run_key, 'state')
+local desired_state = redis.call('HGET', stored_run_key, 'desired_state')
+local current_hard_expires = tonumber(redis.call('HGET', stored_run_key, 'hard_expires_at'))
+if desired_state ~= 'running' then return {-8} end
+if not state or not current_hard_expires or now >= current_hard_expires then
+  if state and state ~= 'released' then
+    redis.call('HSET', stored_run_key, 'state', 'verifying', 'desired_state', 'stopped')
+    redis.call('ZADD', KEYS[3], now, stored_run_key)
+  end
+  return {-9}
+end
+if state == 'reserved' then
+  local current_connect_deadline = tonumber(redis.call('HGET', stored_run_key, 'connect_deadline_at'))
+  if not current_connect_deadline or now >= current_connect_deadline then
+    redis.call('HSET', stored_run_key, 'state', 'verifying', 'desired_state', 'stopped')
+    redis.call('ZADD', KEYS[3], now, stored_run_key)
+    return {-9}
+  end
+elseif state == 'online' then
+  local current_lease_expires = tonumber(redis.call('HGET', stored_run_key, 'lease_expires_at'))
+  if not current_lease_expires or now >= current_lease_expires then
+    redis.call('HSET', stored_run_key, 'state', 'verifying', 'desired_state', 'stopped')
+    redis.call('ZADD', KEYS[3], now, stored_run_key)
+    return {-9}
+  end
+else
+  return {-8}
+end
+return {2, stored_run_id, stored_expires, stored_hash, stored_ciphertext,
+  redis.call('HGET', stored_run_key, 'credential_id'),
+  redis.call('HGET', stored_run_key, 'credential_hash'),
+  redis.call('HGET', stored_run_key, 'proxy_name'),
+  redis.call('HGET', stored_run_key, 'protocol'),
+  redis.call('HGET', stored_run_key, 'public_endpoint'),
+  redis.call('HGET', stored_run_key, 'created_at'),
+  redis.call('HGET', stored_run_key, 'connect_deadline_at'),
+  redis.call('HGET', stored_run_key, 'hard_expires_at')}
+`)
+
 var allocateScript = redis.NewScript(`
 local now = tonumber(ARGV[1])
 local connect_deadline = tonumber(ARGV[2])
@@ -13,7 +146,11 @@ local network_active_max = tonumber(ARGV[7])
 local install_rate_max = tonumber(ARGV[8])
 local network_rate_max = tonumber(ARGV[9])
 
-if redis.call('GET', KEYS[1]) ~= 'anonymous_resources_verified_v1' then
+local info = redis.call('INFO', 'server')
+local node_run_id = string.match(info, 'run_id:([0-9a-f]+)')
+if not node_run_id or redis.call('HGET', KEYS[1], 'state') ~= 'ready' or
+   redis.call('HGET', KEYS[1], 'node_run_id') ~= node_run_id or
+   not redis.call('HGET', KEYS[1], 'owner_hash') or not redis.call('HGET', KEYS[1], 'revision') then
   return {-1}
 end
 
@@ -31,19 +168,14 @@ if redis.call('EXISTS', KEYS[2]) == 1 then
      not stored_run_id or not stored_expires or not stored_ciphertext then
     return {-8}
   end
-  if now >= stored_expires then
-    local state = redis.call('HGET', stored_run_key, 'state')
-    if state and state ~= 'released' then
-      redis.call('HSET', stored_run_key, 'state', 'verifying', 'desired_state', 'stopped')
-      redis.call('ZADD', KEYS[9], now, stored_run_key)
-    end
-    return {-9}
-  end
-  local state = redis.call('HGET', stored_run_key, 'state')
-  local current_hard_expires = tonumber(redis.call('HGET', stored_run_key, 'hard_expires_at'))
   if redis.call('HGET', stored_run_key, 'run_id') ~= stored_run_id or redis.call('HGET', stored_run_key, 'replay_key') ~= KEYS[2] then
     return {-10}
   end
+  if now >= stored_expires then return {-9} end
+  local state = redis.call('HGET', stored_run_key, 'state')
+  local desired_state = redis.call('HGET', stored_run_key, 'desired_state')
+  local current_hard_expires = tonumber(redis.call('HGET', stored_run_key, 'hard_expires_at'))
+  if desired_state ~= 'running' then return {-8} end
   if not state or not current_hard_expires or now >= current_hard_expires then
     if state and state ~= 'released' then
       redis.call('HSET', stored_run_key, 'state', 'verifying', 'desired_state', 'stopped')
@@ -82,11 +214,13 @@ end
 redis.call('ZREMRANGEBYSCORE', KEYS[5], '-inf', now - rate_window)
 redis.call('ZREMRANGEBYSCORE', KEYS[6], '-inf', now - rate_window)
 
-if redis.call('SCARD', KEYS[3]) >= install_active_max then
-  return {-3}
+if redis.call('ZCARD', KEYS[3]) >= install_active_max then
+  local earliest = redis.call('ZRANGE', KEYS[3], 0, 0, 'WITHSCORES')
+  return {-3, earliest[2]}
 end
-if redis.call('SCARD', KEYS[4]) >= network_active_max then
-  return {-4}
+if redis.call('ZCARD', KEYS[4]) >= network_active_max then
+  local earliest = redis.call('ZRANGE', KEYS[4], 0, 0, 'WITHSCORES')
+  return {-4, earliest[2]}
 end
 if redis.call('ZCARD', KEYS[5]) >= install_rate_max then
   local oldest = redis.call('ZRANGE', KEYS[5], 0, 0, 'WITHSCORES')
@@ -112,6 +246,7 @@ redis.call('HSET', KEYS[8],
   'network_hash', ARGV[19],
   'state', 'reserved',
   'desired_state', 'running',
+	'ever_connected', '0',
   'created_at', ARGV[20],
   'connect_deadline_at', ARGV[2],
   'lease_expires_at', '0',
@@ -123,8 +258,8 @@ redis.call('HSET', KEYS[8],
   'replay_key', KEYS[2])
 redis.call('SET', KEYS[7], ARGV[10])
 redis.call('SET', KEYS[10], ARGV[10])
-redis.call('SADD', KEYS[3], ARGV[10])
-redis.call('SADD', KEYS[4], ARGV[10])
+redis.call('ZADD', KEYS[3], connect_deadline, ARGV[10])
+redis.call('ZADD', KEYS[4], connect_deadline, ARGV[10])
 redis.call('ZADD', KEYS[5], now, ARGV[10])
 redis.call('ZADD', KEYS[6], now, ARGV[10])
 redis.call('PEXPIRE', KEYS[5], rate_window)
@@ -155,10 +290,36 @@ end
 if ARGV[5] ~= '' and redis.call('HGET', KEYS[1], 'proxy_name') ~= ARGV[5] then
   return {-2}
 end
+if redis.call('HGET', KEYS[1], 'run_id') ~= ARGV[6] then
+  return {-6}
+end
+if action ~= 'stop' then
+  local info = redis.call('INFO', 'server')
+  local node_run_id = string.match(info, 'run_id:([0-9a-f]+)')
+  if not node_run_id or redis.call('HGET', KEYS[3], 'state') ~= 'ready' or
+     redis.call('HGET', KEYS[3], 'node_run_id') ~= node_run_id or
+     not redis.call('HGET', KEYS[3], 'owner_hash') or not redis.call('HGET', KEYS[3], 'revision') then
+    return {-7}
+  end
+end
 
 local state = redis.call('HGET', KEYS[1], 'state')
 if state ~= 'reserved' and state ~= 'online' and state ~= 'stopping' and state ~= 'verifying' and state ~= 'released' then
   return {-6}
+end
+local installation_key = redis.call('HGET', KEYS[1], 'installation_active_key')
+local network_key = redis.call('HGET', KEYS[1], 'network_active_key')
+if state ~= 'released' then
+  if not installation_key or string.len(installation_key) ~= string.len(ARGV[8]) + 64 or
+     string.sub(installation_key, 1, string.len(ARGV[8])) ~= ARGV[8] or
+     not network_key or string.len(network_key) ~= string.len(ARGV[9]) + 64 or
+     string.sub(network_key, 1, string.len(ARGV[9])) ~= ARGV[9] or
+     not redis.call('ZSCORE', installation_key, ARGV[6]) or not redis.call('ZSCORE', network_key, ARGV[6]) then
+    return {-6}
+  end
+end
+if action ~= 'stop' and redis.call('HGET', KEYS[1], 'desired_state') ~= 'running' then
+  return {-5}
 end
 local hard_expires = tonumber(redis.call('HGET', KEYS[1], 'hard_expires_at'))
 local expired = not hard_expires or now >= hard_expires
@@ -171,28 +332,33 @@ elseif state == 'online' then
 end
 
 if action == 'stop' then
-  if state == 'released' then
-    return {-5}
+  if state ~= 'released' then
+    if expired and state ~= 'stopping' and state ~= 'verifying' then
+      state = 'verifying'
+    elseif state ~= 'stopping' and state ~= 'verifying' then
+      state = 'stopping'
+    end
+    redis.call('HSET', KEYS[1], 'state', state, 'desired_state', 'stopped')
+    redis.call('ZADD', KEYS[2], now, KEYS[1])
+    redis.call('ZADD', installation_key, now, ARGV[6])
+    redis.call('ZADD', network_key, now, ARGV[6])
   end
-  if expired and state ~= 'stopping' and state ~= 'verifying' then
-    state = 'verifying'
-  elseif state ~= 'stopping' and state ~= 'verifying' then
-    state = 'stopping'
-  end
-  redis.call('HSET', KEYS[1], 'state', state, 'desired_state', 'stopped')
-  redis.call('ZADD', KEYS[2], now, KEYS[1])
 elseif state == 'stopping' or state == 'verifying' or state == 'released' then
   return {-5}
 elseif expired then
   redis.call('HSET', KEYS[1], 'state', 'verifying', 'desired_state', 'stopped')
   redis.call('ZADD', KEYS[2], now, KEYS[1])
+  redis.call('ZADD', installation_key, now, ARGV[6])
+  redis.call('ZADD', network_key, now, ARGV[6])
   return {-4}
 elseif action == 'heartbeat' then
   if state == 'online' then
-    local lease_expires = now + tonumber(ARGV[6])
+    local lease_expires = now + tonumber(ARGV[7])
     if lease_expires > hard_expires then lease_expires = hard_expires end
     redis.call('HSET', KEYS[1], 'lease_expires_at', lease_expires)
     redis.call('ZADD', KEYS[2], lease_expires, KEYS[1])
+    redis.call('ZADD', installation_key, lease_expires, ARGV[6])
+    redis.call('ZADD', network_key, lease_expires, ARGV[6])
   elseif state ~= 'reserved' then
     return {-3}
   end
@@ -221,14 +387,35 @@ end
 if redis.call('HGET', KEYS[1], 'run_id') ~= ARGV[2] or redis.call('HGET', KEYS[1], 'proxy_name') ~= ARGV[3] then
   return {-2}
 end
+local info = redis.call('INFO', 'server')
+local node_run_id = string.match(info, 'run_id:([0-9a-f]+)')
+if not node_run_id or redis.call('HGET', KEYS[3], 'state') ~= 'ready' or
+   redis.call('HGET', KEYS[3], 'node_run_id') ~= node_run_id or
+   not redis.call('HGET', KEYS[3], 'owner_hash') or not redis.call('HGET', KEYS[3], 'revision') then
+  return {-5}
+end
 local state = redis.call('HGET', KEYS[1], 'state')
 if state == 'stopping' or state == 'verifying' or state == 'released' then
   return {-3}
+end
+if redis.call('HGET', KEYS[1], 'desired_state') ~= 'running' then
+  return {-3}
+end
+local installation_key = redis.call('HGET', KEYS[1], 'installation_active_key')
+local network_key = redis.call('HGET', KEYS[1], 'network_active_key')
+if not installation_key or string.len(installation_key) ~= string.len(ARGV[5]) + 64 or
+   string.sub(installation_key, 1, string.len(ARGV[5])) ~= ARGV[5] or
+   not network_key or string.len(network_key) ~= string.len(ARGV[6]) + 64 or
+   string.sub(network_key, 1, string.len(ARGV[6])) ~= ARGV[6] or
+   not redis.call('ZSCORE', installation_key, ARGV[2]) or not redis.call('ZSCORE', network_key, ARGV[2]) then
+  return {-2}
 end
 local hard_expires = tonumber(redis.call('HGET', KEYS[1], 'hard_expires_at'))
 if not hard_expires or now >= hard_expires then
   redis.call('HSET', KEYS[1], 'state', 'verifying', 'desired_state', 'stopped')
   redis.call('ZADD', KEYS[2], now, KEYS[1])
+  redis.call('ZADD', installation_key, now, ARGV[2])
+  redis.call('ZADD', network_key, now, ARGV[2])
   return {-4}
 end
 if state == 'reserved' then
@@ -236,17 +423,23 @@ if state == 'reserved' then
   if not connect_deadline or now >= connect_deadline then
     redis.call('HSET', KEYS[1], 'state', 'verifying', 'desired_state', 'stopped')
     redis.call('ZADD', KEYS[2], now, KEYS[1])
+    redis.call('ZADD', installation_key, now, ARGV[2])
+    redis.call('ZADD', network_key, now, ARGV[2])
     return {-4}
   end
   local lease_expires = now + tonumber(ARGV[4])
   if lease_expires > hard_expires then lease_expires = hard_expires end
-  redis.call('HSET', KEYS[1], 'state', 'online', 'lease_expires_at', lease_expires)
+  redis.call('HSET', KEYS[1], 'state', 'online', 'lease_expires_at', lease_expires, 'ever_connected', '1')
   redis.call('ZADD', KEYS[2], lease_expires, KEYS[1])
+  redis.call('ZADD', installation_key, lease_expires, ARGV[2])
+  redis.call('ZADD', network_key, lease_expires, ARGV[2])
 elseif state == 'online' then
   local lease_expires = tonumber(redis.call('HGET', KEYS[1], 'lease_expires_at'))
   if not lease_expires or now >= lease_expires then
     redis.call('HSET', KEYS[1], 'state', 'verifying', 'desired_state', 'stopped')
     redis.call('ZADD', KEYS[2], now, KEYS[1])
+    redis.call('ZADD', installation_key, now, ARGV[2])
+    redis.call('ZADD', network_key, now, ARGV[2])
     return {-4}
   end
 else
@@ -274,8 +467,24 @@ if redis.call('HGET', KEYS[1], 'run_id') ~= ARGV[2] or redis.call('HGET', KEYS[1
   return {-2}
 end
 local state = redis.call('HGET', KEYS[1], 'state')
+local desired_state = redis.call('HGET', KEYS[1], 'desired_state')
+if state == 'reserved' or state == 'online' then
+  if desired_state ~= 'running' then return {-3} end
+elseif state == 'stopping' or state == 'verifying' or state == 'released' then
+  if desired_state ~= 'stopped' then return {-3} end
+else
+  return {-3}
+end
 if state == 'released' then
   return {1}
+end
+if ARGV[10] == 'never_registered' then
+  local connect_deadline = tonumber(redis.call('HGET', KEYS[1], 'connect_deadline_at'))
+  if redis.call('HGET', KEYS[1], 'ever_connected') ~= '0' or not connect_deadline or now < connect_deadline then
+    return {-5}
+  end
+elseif ARGV[10] ~= 'offline_sample' then
+  return {-5}
 end
 local hard_expires = tonumber(redis.call('HGET', KEYS[1], 'hard_expires_at'))
 local expired = not hard_expires or now >= hard_expires
@@ -305,7 +514,7 @@ if not resource_key or string.len(resource_key) ~= string.len(resource_prefix) +
   return {-4}
 end
 if redis.call('GET', resource_key) ~= ARGV[2] or redis.call('GET', proxy_key) ~= ARGV[2] or
-   redis.call('SISMEMBER', installation_key, ARGV[2]) ~= 1 or redis.call('SISMEMBER', network_key, ARGV[2]) ~= 1 then
+   not redis.call('ZSCORE', installation_key, ARGV[2]) or not redis.call('ZSCORE', network_key, ARGV[2]) then
   return {-4}
 end
 local replay_exists = redis.call('EXISTS', replay_key)
@@ -318,8 +527,8 @@ if replay_exists == 1 and (redis.call('HGET', replay_key, 'run_id') ~= ARGV[2] o
 end
 redis.call('DEL', resource_key)
 redis.call('DEL', proxy_key)
-redis.call('SREM', installation_key, ARGV[2])
-redis.call('SREM', network_key, ARGV[2])
+redis.call('ZREM', installation_key, ARGV[2])
+redis.call('ZREM', network_key, ARGV[2])
 redis.call('ZREM', KEYS[2], KEYS[1])
 -- Keep the replay identity and its original TTL as a terminal tombstone so a
 -- retry cannot become a second successful allocation. Removing ciphertext
@@ -327,5 +536,44 @@ redis.call('ZREM', KEYS[2], KEYS[1])
 if replay_exists == 1 then redis.call('HDEL', replay_key, 'ciphertext') end
 redis.call('HSET', KEYS[1], 'state', 'released', 'desired_state', 'stopped', 'released_at', now)
 redis.call('PEXPIRE', KEYS[1], ARGV[4])
+return {1}
+`)
+
+var claimVerificationScript = redis.NewScript(`
+local now = tonumber(ARGV[1])
+local claim_until = now + tonumber(ARGV[2])
+local entries = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'WITHSCORES', 'LIMIT', 0, ARGV[3])
+local result = {}
+for index = 1, #entries, 2 do
+  redis.call('ZADD', KEYS[1], claim_until, entries[index])
+  table.insert(result, entries[index])
+  table.insert(result, entries[index + 1])
+end
+return result
+`)
+
+var inspectVerificationScript = redis.NewScript(`
+if redis.call('TYPE', KEYS[1]).ok ~= 'hash' then return {-1} end
+local fields = redis.call('HGETALL', KEYS[1])
+local result = {1}
+for index = 1, #fields do table.insert(result, fields[index]) end
+return result
+`)
+
+var quarantineVerificationScript = redis.NewScript(`
+local current_score = redis.call('ZSCORE', KEYS[1], ARGV[1])
+if not current_score or tonumber(current_score) ~= tonumber(ARGV[2]) then return {0} end
+redis.call('ZREM', KEYS[1], ARGV[1])
+redis.call('ZADD', KEYS[2], ARGV[3], ARGV[1])
+redis.call('HSET', KEYS[3], ARGV[1], ARGV[4])
+local marker_type = redis.call('TYPE', KEYS[4]).ok
+if marker_type == 'none' then
+  redis.call('HSET', KEYS[4], 'state', 'blocked')
+elseif marker_type == 'hash' then
+  redis.call('HSET', KEYS[4], 'state', 'blocked')
+end
+if marker_type == 'none' or marker_type == 'hash' then
+  redis.call('HINCRBY', KEYS[4], 'generation', 1)
+end
 return {1}
 `)

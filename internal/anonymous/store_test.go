@@ -8,6 +8,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"reflect"
 	"sort"
@@ -22,6 +24,36 @@ import (
 type testClock struct {
 	mu  sync.Mutex
 	now time.Time
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("fixture RNG failure") }
+
+type beforeVerificationInspectionHook struct {
+	once sync.Once
+	run  func() error
+}
+
+func (h *beforeVerificationInspectionHook) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (h *beforeVerificationInspectionHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, command redis.Cmder) error {
+		var err error
+		if command.Name() == "evalsha" && len(command.Args()) > 1 && command.Args()[1] == inspectVerificationScript.Hash() {
+			h.once.Do(func() { err = h.run() })
+		}
+		if err != nil {
+			return err
+		}
+		return next(ctx, command)
+	}
+}
+
+func (h *beforeVerificationInspectionHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
 }
 
 func (c *testClock) Now() time.Time {
@@ -43,15 +75,37 @@ type redisFixture struct {
 	clock  *testClock
 }
 
+func guardedRedisFixtureOptions(raw string) (*redis.Options, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Opaque != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawPath != "" ||
+		(parsed.Scheme != "redis" && parsed.Scheme != "rediss") || parsed.Path != "/15" {
+		return nil, errors.New("unsafe Redis fixture URL")
+	}
+	options, err := redis.ParseURL(raw)
+	if err != nil || options.Network != "tcp" || options.DB != 15 {
+		return nil, errors.New("unsafe Redis fixture URL")
+	}
+	host, _, err := net.SplitHostPort(options.Addr)
+	ip := net.ParseIP(host)
+	if err != nil || ip == nil || !ip.IsLoopback() {
+		return nil, errors.New("unsafe Redis fixture URL")
+	}
+	options.MaxRetries = -1
+	options.DialTimeout = time.Second
+	options.ReadTimeout = time.Second
+	options.WriteTimeout = time.Second
+	return options, nil
+}
+
 func newRedisFixture(t *testing.T, mutate func(*Config)) *redisFixture {
 	t.Helper()
 	url := os.Getenv("NODELANE_TEST_REDIS_URL")
 	if url == "" {
 		t.Skip("NODELANE_TEST_REDIS_URL is required for real Redis tests")
 	}
-	options, err := redis.ParseURL(url)
+	options, err := guardedRedisFixtureOptions(url)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("unsafe Redis fixture configuration: %v", err)
 	}
 	client := redis.NewClient(options)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -59,6 +113,11 @@ func newRedisFixture(t *testing.T, mutate func(*Config)) *redisFixture {
 	if err := client.Ping(ctx).Err(); err != nil {
 		_ = client.Close()
 		t.Fatalf("test Redis unavailable: %v", err)
+	}
+	marker, err := client.Get(ctx, "nodelane:test:marker").Result()
+	if err != nil || marker != "bff_fixture_v1" {
+		_ = client.Close()
+		t.Fatalf("unsafe Redis fixture marker: value=%q err=%v", marker, err)
 	}
 	random := make([]byte, 12)
 	if _, err := rand.Read(random); err != nil {
@@ -71,6 +130,7 @@ func newRedisFixture(t *testing.T, mutate func(*Config)) *redisFixture {
 		Prefix:           prefix,
 		CredentialPepper: []byte("credential-pepper-is-independent-32"),
 		ReplayKey:        []byte("replay-key-is-exactly-32-bytes!!"),
+		FenceOwnerToken:  []byte("fence-owner-token-is-independent-32"),
 		Clock:            clock.Now,
 		Random:           rand.Reader,
 		PublicDomain:     "tunnel.test",
@@ -119,8 +179,31 @@ func cleanupFixtureKeys(t *testing.T, client *redis.Client, prefix string) {
 
 func (f *redisFixture) ready(t *testing.T) {
 	t.Helper()
-	if err := f.store.MarkResourcesVerified(context.Background()); err != nil {
+	observed, err := f.store.ObserveResourceFence(context.Background())
+	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := f.store.MarkResourcesVerified(context.Background(), observed); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGuardedRedisFixtureOptions(t *testing.T) {
+	for _, raw := range []string{
+		"redis://127.0.0.1:6379/0",
+		"redis://localhost:6379/15",
+		"redis://127.0.0.1:6379/15?protocol=3",
+		"redis://127.0.0.1:6379/15#fragment",
+		"http://127.0.0.1:6379/15",
+		"redis://192.0.2.1:6379/15",
+	} {
+		if _, err := guardedRedisFixtureOptions(raw); err == nil {
+			t.Fatalf("unsafe fixture URL accepted: %q", raw)
+		}
+	}
+	options, err := guardedRedisFixtureOptions("redis://:synthetic@127.0.0.1:6379/15")
+	if err != nil || options.DB != 15 || options.Addr != "127.0.0.1:6379" {
+		t.Fatalf("safe fixture URL rejected: %#v %v", options, err)
 	}
 }
 
@@ -148,6 +231,150 @@ func TestAllocateRequiresExplicitResourceVerificationAfterRedisLoss(t *testing.T
 	cleanupFixtureKeys(t, f.client, f.prefix)
 	if _, err := f.store.Allocate(context.Background(), allocationRequest("after-loss")); !errors.Is(err, ErrResourcesUnverified) {
 		t.Fatalf("allocation after Redis loss did not fail closed: %v", err)
+	}
+}
+
+func TestResourceFenceUsesRedisRunIDOwnerAndRevisionCAS(t *testing.T) {
+	f := newRedisFixture(t, nil)
+	ctx := context.Background()
+	observed, err := f.store.ObserveResourceFence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observed.RedisRunID) != 40 || observed.Revision != "" {
+		t.Fatalf("unexpected initial fence: %#v", observed)
+	}
+	marked, err := f.store.MarkResourcesVerified(ctx, observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marked.RedisRunID != observed.RedisRunID || !validRandomName(marked.Revision, "afr_", 16) {
+		t.Fatalf("invalid marked fence: %#v", marked)
+	}
+	if _, err := f.store.MarkResourcesVerified(ctx, observed); !errors.Is(err, ErrFenceConflict) {
+		t.Fatalf("stale fence observation reopened allocations: %v", err)
+	}
+
+	other, err := NewStore(Config{
+		Client: f.client, Prefix: f.prefix,
+		CredentialPepper: []byte("credential-pepper-is-independent-32"),
+		ReplayKey:        []byte("replay-key-is-exactly-32-bytes!!"),
+		FenceOwnerToken:  []byte("different-fence-owner-token-32-bytes"),
+		Clock:            f.clock.Now, Random: rand.Reader, PublicDomain: "tunnel.test",
+		TCPPorts: []uint16{21001}, UDPPorts: []uint16{22001},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherObserved, err := other.ObserveResourceFence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.MarkResourcesVerified(ctx, otherObserved); !errors.Is(err, ErrFenceConflict) {
+		t.Fatalf("different owner reopened allocations: %v", err)
+	}
+
+	if err := f.store.BlockAllocations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Allocate(ctx, allocationRequest("blocked-fence")); !errors.Is(err, ErrResourcesUnverified) {
+		t.Fatalf("blocked fence allowed allocation: %v", err)
+	}
+	reconciled, err := f.store.ObserveResourceFence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.MarkResourcesVerified(ctx, reconciled); err != nil {
+		t.Fatalf("same owner could not reopen after a fresh observation: %v", err)
+	}
+}
+
+func TestResourceFenceRejectsMarkerFromAnotherRedisRun(t *testing.T) {
+	f := newRedisFixture(t, nil)
+	f.ready(t)
+	ctx := context.Background()
+	if err := f.client.HSet(ctx, f.store.readyKey(), "node_run_id", strings.Repeat("0", 40)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Allocate(ctx, allocationRequest("stale-node-fence")); !errors.Is(err, ErrResourcesUnverified) {
+		t.Fatalf("stale Redis run marker did not fail closed: %v", err)
+	}
+}
+
+func TestResourceFenceRejectsObservationFromBeforeEveryBlock(t *testing.T) {
+	for _, block := range []string{"explicit", "repeated", "quarantine"} {
+		t.Run(block, func(t *testing.T) {
+			f := newRedisFixture(t, nil)
+			f.ready(t)
+			ctx := context.Background()
+			allocation, err := f.store.Allocate(ctx, allocationRequest("fence-invalidated"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if block == "repeated" {
+				if err := f.store.BlockAllocations(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			observed, err := f.store.ObserveResourceFence(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if block == "quarantine" {
+				if _, err := f.store.RequestStop(ctx, allocation.RunID, allocation.CredentialToken); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.client.HDel(ctx, f.store.runKey(allocation.RunID), "proxy_name").Err(); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.store.PendingVerification(ctx, 1); !errors.Is(err, ErrVerificationCorrupt) {
+					t.Fatalf("corrupt item did not trigger quarantine: %v", err)
+				}
+			} else if err := f.store.BlockAllocations(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.store.MarkResourcesVerified(ctx, observed); !errors.Is(err, ErrFenceConflict) {
+				t.Fatalf("observation predating %s reopened allocations: %v", block, err)
+			}
+			if _, err := f.store.Allocate(ctx, allocationRequest("stale-proof-reopen")); !errors.Is(err, ErrResourcesUnverified) {
+				t.Fatalf("stale reconciliation proof left allocations open: %v", err)
+			}
+		})
+	}
+}
+
+func TestBlockedFenceRejectsRunExpansionButAllowsDrain(t *testing.T) {
+	f := newRedisFixture(t, nil)
+	f.ready(t)
+	ctx := context.Background()
+	allocation, err := f.store.Allocate(ctx, allocationRequest("fence-drain"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.MarkConnected(ctx, allocation.RunID, allocation.ProxyName); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.BlockAllocations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Authorize(ctx, allocation.RunID, allocation.CredentialToken, allocation.ProxyName); !errors.Is(err, ErrResourcesUnverified) {
+		t.Fatalf("authorize passed a blocked fence: %v", err)
+	}
+	if _, err := f.store.Heartbeat(ctx, allocation.RunID, allocation.CredentialToken); !errors.Is(err, ErrResourcesUnverified) {
+		t.Fatalf("heartbeat passed a blocked fence: %v", err)
+	}
+	if _, err := f.store.MarkConnected(ctx, allocation.RunID, allocation.ProxyName); !errors.Is(err, ErrResourcesUnverified) {
+		t.Fatalf("mark connected passed a blocked fence: %v", err)
+	}
+	if _, err := f.store.RequestStop(ctx, allocation.RunID, allocation.CredentialToken); err != nil {
+		t.Fatalf("blocked fence prevented stop: %v", err)
+	}
+	items, err := f.store.PendingVerification(ctx, 1)
+	if err != nil || len(items) != 1 || items[0].RunID != allocation.RunID {
+		t.Fatalf("blocked fence prevented verification: %#v %v", items, err)
+	}
+	if err := f.store.ConfirmReleased(ctx, confirmedRelease(allocation.RunID, allocation.ProxyName)); err != nil {
+		t.Fatalf("blocked fence prevented trusted release: %v", err)
 	}
 }
 
@@ -266,6 +493,31 @@ func TestConcurrentSameIdempotencyKeyReturnsOneAllocationAndOneSuccessCount(t *t
 	}
 }
 
+func TestReplayRecoveryDoesNotRequireNewRandomness(t *testing.T) {
+	f := newRedisFixture(t, nil)
+	f.ready(t)
+	request := allocationRequest("rng-independent-replay")
+	first, err := f.store.Allocate(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewStore(Config{
+		Client: f.client, Prefix: f.prefix,
+		CredentialPepper: []byte("credential-pepper-is-independent-32"),
+		ReplayKey:        []byte("replay-key-is-exactly-32-bytes!!"),
+		FenceOwnerToken:  []byte("fence-owner-token-is-independent-32"),
+		Clock:            f.clock.Now, Random: failingReader{}, PublicDomain: "tunnel.test",
+		TCPPorts: []uint16{21001}, UDPPorts: []uint16{22001},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := reopened.Allocate(context.Background(), request)
+	if err != nil || !replayed.Replayed || replayed.RunID != first.RunID || replayed.CredentialToken != first.CredentialToken {
+		t.Fatalf("committed replay depended on fresh RNG: %#v %v", replayed, err)
+	}
+}
+
 func TestAllocateBindsIdempotencyToRequestDigest(t *testing.T) {
 	f := newRedisFixture(t, nil)
 	f.ready(t)
@@ -351,6 +603,103 @@ func TestReplayNeverReturnsCredentialAfterStopOrExactReplayExpiry(t *testing.T) 
 	}
 }
 
+func TestReplayExpiryDoesNotStopLiveRun(t *testing.T) {
+	for _, operation := range []string{"lookup", "allocation race"} {
+		t.Run(operation, func(t *testing.T) {
+			f := newRedisFixture(t, nil)
+			f.ready(t)
+			ctx := context.Background()
+			request := allocationRequest("expired-replay-live-run")
+			allocation, err := f.store.Allocate(ctx, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.clock.Set(allocation.CreatedAt.Add(100 * time.Second))
+			if _, err := f.store.MarkConnected(ctx, allocation.RunID, allocation.ProxyName); err != nil {
+				t.Fatal(err)
+			}
+			before, err := f.client.HGetAll(ctx, f.store.runKey(allocation.RunID)).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.clock.Set(allocation.CreatedAt.Add(2 * time.Minute))
+			got, err := replayThroughOperation(f, request, operation)
+			if !errors.Is(err, ErrRunExpired) || !reflect.DeepEqual(got, Allocation{}) {
+				t.Fatalf("expired replay returned authorization: %#v %v", got, err)
+			}
+			after, err := f.client.HGetAll(ctx, f.store.runKey(allocation.RunID)).Result()
+			if err != nil || !reflect.DeepEqual(after, before) {
+				t.Fatalf("replay expiry mutated still-live run: before=%v after=%v err=%v", before, after, err)
+			}
+			if _, err := f.store.Authorize(ctx, allocation.RunID, allocation.CredentialToken, allocation.ProxyName); err != nil {
+				t.Fatalf("live lease was invalidated by replay expiry: %v", err)
+			}
+		})
+	}
+}
+
+func TestExpiredReplayValidatesRunAssociationBeforeMutation(t *testing.T) {
+	for _, operation := range []string{"lookup", "allocation race"} {
+		t.Run(operation, func(t *testing.T) {
+			f := newRedisFixture(t, nil)
+			f.ready(t)
+			ctx := context.Background()
+			request := allocationRequest("expired-replay-wrong-owner")
+			first, err := f.store.Allocate(ctx, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			otherRequest := allocationRequest("expired-replay-other-owner")
+			otherRequest.InstallationID = "another-replay-installation"
+			other, err := f.store.Allocate(ctx, otherRequest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			otherKey := f.store.runKey(other.RunID)
+			if err := f.client.HSet(ctx, f.store.replayKey(request.InstallationID, request.NetworkKey, request.IdempotencyKey), "run_key", otherKey).Err(); err != nil {
+				t.Fatal(err)
+			}
+			before, err := f.client.HGetAll(ctx, otherKey).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.clock.Set(first.CreatedAt.Add(2 * time.Minute))
+			got, err := replayThroughOperation(f, request, operation)
+			if !errors.Is(err, ErrInvalidState) || !reflect.DeepEqual(got, Allocation{}) {
+				t.Fatalf("invalid expired replay association accepted: %#v %v", got, err)
+			}
+			after, err := f.client.HGetAll(ctx, otherKey).Result()
+			if err != nil || !reflect.DeepEqual(after, before) {
+				t.Fatalf("expired corrupt replay mutated another run: before=%v after=%v err=%v", before, after, err)
+			}
+		})
+	}
+}
+
+func replayThroughOperation(f *redisFixture, request AllocateRequest, operation string) (Allocation, error) {
+	if operation == "lookup" {
+		return f.store.Allocate(context.Background(), request)
+	}
+	requestHash, err := hashAllocationRequest(request)
+	if err != nil {
+		return Allocation{}, err
+	}
+	key := f.store.replayKey(request.InstallationID, request.NetworkKey, request.IdempotencyKey)
+	args := make([]any, 22)
+	for index := range args {
+		args[index] = ""
+	}
+	args[0], args[10], args[21] = f.clock.Now().UnixMilli(), requestHash, f.store.prefix+":run:"
+	values, err := allocateScript.Run(context.Background(), f.client, []string{
+		f.store.readyKey(), key, "", "", "", "", "", "", f.store.verificationKey(), "",
+	}, args...).Slice()
+	if err != nil {
+		return Allocation{}, err
+	}
+	allocation, _, err := f.store.decodeAllocateResult(key, requestHash, f.clock.Now(), values)
+	return allocation, err
+}
+
 func TestAllocateEnforcesActiveLimitsUntilConfirmedRelease(t *testing.T) {
 	f := newRedisFixture(t, nil)
 	f.ready(t)
@@ -383,11 +732,75 @@ func TestAllocateEnforcesActiveLimitsUntilConfirmedRelease(t *testing.T) {
 	if _, err := f.store.Allocate(context.Background(), other); !errors.Is(err, ErrInstallationLimit) {
 		t.Fatalf("stop released resource before data-plane confirmation: %v", err)
 	}
-	if err := f.store.ConfirmReleased(context.Background(), first.RunID, first.ProxyName); err != nil {
+	if err := f.store.ConfirmReleased(context.Background(), confirmedRelease(first.RunID, first.ProxyName)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.store.Allocate(context.Background(), other); err != nil {
 		t.Fatalf("confirmed release did not free active slot: %v", err)
+	}
+}
+
+func TestConcurrencyLimitsReportScopedEarliestVerificationRetry(t *testing.T) {
+	f := newRedisFixture(t, nil)
+	f.ready(t)
+	ctx := context.Background()
+	first, err := f.store.Allocate(ctx, allocationRequest("active-retry-first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := allocationRequest("active-retry-other")
+	other.NetworkKey = "198.51.100.71"
+	_, err = f.store.Allocate(ctx, other)
+	var installationLimit *ConcurrencyLimitError
+	if !errors.As(err, &installationLimit) || !errors.Is(err, ErrInstallationLimit) || errors.Is(err, ErrNetworkLimit) ||
+		installationLimit.Scope != LimitInstallation || installationLimit.RetryAfter != connectLifetime {
+		t.Fatalf("installation retry metadata=%#v err=%v", installationLimit, err)
+	}
+	if _, err := f.store.MarkConnected(ctx, first.RunID, first.ProxyName); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.store.Allocate(ctx, other)
+	installationLimit = nil
+	if !errors.As(err, &installationLimit) || installationLimit.RetryAfter != heartbeatLease {
+		t.Fatalf("connected retry did not follow lease: %#v err=%v", installationLimit, err)
+	}
+	f.clock.Set(f.clock.Now().Add(10 * time.Second))
+	if _, err := f.store.Heartbeat(ctx, first.RunID, first.CredentialToken); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.store.Allocate(ctx, other)
+	installationLimit = nil
+	if !errors.As(err, &installationLimit) || installationLimit.RetryAfter != heartbeatLease {
+		t.Fatalf("heartbeat retry did not follow renewed lease: %#v err=%v", installationLimit, err)
+	}
+	if _, err := f.store.RequestStop(ctx, first.RunID, first.CredentialToken); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.store.Allocate(ctx, other)
+	installationLimit = nil
+	if !errors.As(err, &installationLimit) || installationLimit.RetryAfter != time.Millisecond {
+		t.Fatalf("stopping retry did not report immediate verification eligibility: %#v err=%v", installationLimit, err)
+	}
+
+	for index := 0; index < 2; index++ {
+		request := allocationRequest(fmt.Sprintf("network-retry-%d", index))
+		request.InstallationID = fmt.Sprintf("network-retry-installation-%d", index)
+		request.NetworkKey = "203.0.113.71"
+		if _, err := f.store.Allocate(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+		if index == 0 {
+			f.clock.Set(f.clock.Now().Add(time.Second))
+		}
+	}
+	third := allocationRequest("network-retry-third")
+	third.InstallationID = "network-retry-installation-third"
+	third.NetworkKey = "203.0.113.71"
+	_, err = f.store.Allocate(ctx, third)
+	var networkLimit *ConcurrencyLimitError
+	if !errors.As(err, &networkLimit) || !errors.Is(err, ErrNetworkLimit) || errors.Is(err, ErrInstallationLimit) ||
+		networkLimit.Scope != LimitNetwork || networkLimit.RetryAfter != connectLifetime-time.Second {
+		t.Fatalf("network retry metadata=%#v err=%v", networkLimit, err)
 	}
 }
 
@@ -406,7 +819,7 @@ func TestSuccessfulAllocationRateLimitsDoNotCountReplayOrRejectedAllocation(t *t
 		if _, err := f.store.RequestStop(context.Background(), got.RunID, got.CredentialToken); err != nil {
 			t.Fatal(err)
 		}
-		if err := f.store.ConfirmReleased(context.Background(), got.RunID, got.ProxyName); err != nil {
+		if err := f.store.ConfirmReleased(context.Background(), confirmedRelease(got.RunID, got.ProxyName)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -434,7 +847,7 @@ func TestSuccessfulAllocationRateLimitsOneNormalizedNetworkKey(t *testing.T) {
 		if _, err := f.store.RequestStop(context.Background(), got.RunID, got.CredentialToken); err != nil {
 			t.Fatal(err)
 		}
-		if err := f.store.ConfirmReleased(context.Background(), got.RunID, got.ProxyName); err != nil {
+		if err := f.store.ConfirmReleased(context.Background(), confirmedRelease(got.RunID, got.ProxyName)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -628,6 +1041,72 @@ func TestRequestStopRejectsCorruptRunStateWithoutReleasingOwnership(t *testing.T
 	}
 }
 
+func TestAuthorizeAndMarkConnectedRequireRunningDesiredState(t *testing.T) {
+	for _, operation := range []string{"authorize", "mark connected"} {
+		t.Run(operation, func(t *testing.T) {
+			f := newRedisFixture(t, nil)
+			f.ready(t)
+			allocation, err := f.store.Allocate(context.Background(), allocationRequest("desired-stopped"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.client.HSet(context.Background(), f.store.runKey(allocation.RunID), "desired_state", "stopped").Err(); err != nil {
+				t.Fatal(err)
+			}
+			switch operation {
+			case "authorize":
+				_, err = f.store.Authorize(context.Background(), allocation.RunID, allocation.CredentialToken, allocation.ProxyName)
+			case "mark connected":
+				_, err = f.store.MarkConnected(context.Background(), allocation.RunID, allocation.ProxyName)
+			}
+			if !errors.Is(err, ErrRunStopped) {
+				t.Fatalf("%s ignored desired stopped state: %v", operation, err)
+			}
+		})
+	}
+}
+
+func TestRunOperationsValidateImmutableRunIDBeforeMutation(t *testing.T) {
+	for _, operation := range []string{"heartbeat", "stop"} {
+		t.Run(operation, func(t *testing.T) {
+			f := newRedisFixture(t, nil)
+			f.ready(t)
+			allocation, err := f.store.Allocate(context.Background(), allocationRequest("immutable-run-id"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.store.MarkConnected(context.Background(), allocation.RunID, allocation.ProxyName); err != nil {
+				t.Fatal(err)
+			}
+			runKey := f.store.runKey(allocation.RunID)
+			before, err := f.client.HMGet(context.Background(), runKey, "state", "desired_state", "lease_expires_at").Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.client.HSet(context.Background(), runKey, "run_id", "anr_aaaaaaaaaaaaaaaaaaaaaaaaaa").Err(); err != nil {
+				t.Fatal(err)
+			}
+			f.clock.Set(f.clock.Now().Add(time.Second))
+			switch operation {
+			case "heartbeat":
+				_, err = f.store.Heartbeat(context.Background(), allocation.RunID, allocation.CredentialToken)
+			case "stop":
+				_, err = f.store.RequestStop(context.Background(), allocation.RunID, allocation.CredentialToken)
+			}
+			if !errors.Is(err, ErrInvalidState) {
+				t.Fatalf("operation accepted mismatched stored run ID: %v", err)
+			}
+			after, err := f.client.HMGet(context.Background(), runKey, "state", "desired_state", "lease_expires_at").Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("operation mutated run before detecting identity mismatch: before=%v after=%v", before, after)
+			}
+		})
+	}
+}
+
 func TestConfirmReleasedComparesCurrentResourceOwner(t *testing.T) {
 	f := newRedisFixture(t, func(config *Config) {
 		config.TCPPorts = []uint16{23001}
@@ -642,7 +1121,7 @@ func TestConfirmReleasedComparesCurrentResourceOwner(t *testing.T) {
 	if _, err := f.store.RequestStop(context.Background(), first.RunID, first.CredentialToken); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.store.ConfirmReleased(context.Background(), first.RunID, first.ProxyName); err != nil {
+	if err := f.store.ConfirmReleased(context.Background(), confirmedRelease(first.RunID, first.ProxyName)); err != nil {
 		t.Fatal(err)
 	}
 	secondReq := allocationRequest("new")
@@ -654,11 +1133,150 @@ func TestConfirmReleasedComparesCurrentResourceOwner(t *testing.T) {
 	}
 	// A delayed duplicate confirmation for the old run must not delete the
 	// resource now owned by the new run.
-	if err := f.store.ConfirmReleased(context.Background(), first.RunID, first.ProxyName); err != nil && !errors.Is(err, ErrRunNotFound) {
+	if err := f.store.ConfirmReleased(context.Background(), confirmedRelease(first.RunID, first.ProxyName)); err != nil && !errors.Is(err, ErrRunNotFound) {
 		t.Fatal(err)
 	}
 	if _, err := f.store.Authorize(context.Background(), second.RunID, second.CredentialToken, second.ProxyName); err != nil {
 		t.Fatalf("late release removed new owner: %v", err)
+	}
+}
+
+func TestConfirmReleasedRequiresOfflineAvailableZeroConnectionEvidence(t *testing.T) {
+	zero := int64(0)
+	for _, test := range []struct {
+		name      string
+		offline   bool
+		available bool
+		current   int64
+	}{
+		{name: "online zero", available: true, current: zero},
+		{name: "offline unavailable", offline: true, current: zero},
+		{name: "offline active connection", offline: true, available: true, current: 1},
+		{name: "offline invalid connection count", offline: true, available: true, current: -1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newRedisFixture(t, nil)
+			f.ready(t)
+			allocation, err := f.store.Allocate(context.Background(), allocationRequest("release-evidence"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.store.RequestStop(context.Background(), allocation.RunID, allocation.CredentialToken); err != nil {
+				t.Fatal(err)
+			}
+			evidence := ReleaseEvidence{
+				Kind: ReleaseEvidenceOfflineSample, RunID: allocation.RunID, ProxyName: allocation.ProxyName,
+				ObservedOffline: test.offline, SampleAvailable: test.available, CurrentConnections: test.current,
+			}
+			if err := f.store.ConfirmReleased(context.Background(), evidence); !errors.Is(err, ErrReleaseUnconfirmed) {
+				t.Fatalf("unsafe release evidence accepted: %#v %v", evidence, err)
+			}
+			counts, err := readCounts(f, "installation-a", "192.0.2.15")
+			if err != nil || counts.InstallationActive != 1 || counts.NetworkActive != 1 {
+				t.Fatalf("unconfirmed release freed ownership: %#v %v", counts, err)
+			}
+			f.clock.Set(f.clock.Now().Add(time.Minute))
+			items, err := f.store.PendingVerification(context.Background(), 1)
+			if err != nil || len(items) != 1 || items[0].RunID != allocation.RunID {
+				t.Fatalf("unconfirmed release left verification queue: %#v %v", items, err)
+			}
+		})
+	}
+}
+
+func TestConfirmReleasedAllowsOnlyProvenNeverRegisteredReservation(t *testing.T) {
+	f := newRedisFixture(t, nil)
+	f.ready(t)
+	ctx := context.Background()
+	allocation, err := f.store.Allocate(ctx, allocationRequest("never-registered"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := ReleaseEvidence{
+		Kind: ReleaseEvidenceNeverRegistered, RunID: allocation.RunID, ProxyName: allocation.ProxyName,
+		ConfirmedNeverRegistered: true,
+	}
+	if err := f.store.ConfirmReleased(ctx, evidence); !errors.Is(err, ErrReleaseUnconfirmed) {
+		t.Fatalf("reservation released before the complete registration window: %v", err)
+	}
+	f.clock.Set(allocation.ConnectDeadlineAt)
+	if err := f.store.ConfirmReleased(ctx, evidence); err != nil {
+		t.Fatalf("proven never-registered reservation was not released: %v", err)
+	}
+
+	connectedRequest := allocationRequest("once-connected")
+	connectedRequest.InstallationID = "once-connected-installation"
+	connectedRequest.NetworkKey = "198.51.100.91"
+	connected, err := f.store.Allocate(ctx, connectedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.MarkConnected(ctx, connected.RunID, connected.ProxyName); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.RequestStop(ctx, connected.RunID, connected.CredentialToken); err != nil {
+		t.Fatal(err)
+	}
+	connectedEvidence := ReleaseEvidence{
+		Kind: ReleaseEvidenceNeverRegistered, RunID: connected.RunID, ProxyName: connected.ProxyName,
+		ConfirmedNeverRegistered: true,
+	}
+	if err := f.store.ConfirmReleased(ctx, connectedEvidence); !errors.Is(err, ErrReleaseUnconfirmed) {
+		t.Fatalf("once-connected run accepted never-registered evidence: %v", err)
+	}
+}
+
+func TestConfirmReleasedValidatesStateBeforeDeletingExpiredOwnership(t *testing.T) {
+	for _, test := range []struct {
+		state   string
+		desired string
+	}{
+		{"corrupt", "running"},
+		{"stopping", "running"},
+		{"verifying", "invalid"},
+		{"online", "stopped"},
+		{"released", "running"},
+	} {
+		t.Run(test.state+"/"+test.desired, func(t *testing.T) {
+			f := newRedisFixture(t, nil)
+			f.ready(t)
+			ctx := context.Background()
+			allocation, err := f.store.Allocate(ctx, allocationRequest("invalid-release-state"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.client.HSet(ctx, f.store.runKey(allocation.RunID), "state", test.state, "desired_state", test.desired).Err(); err != nil {
+				t.Fatal(err)
+			}
+			f.clock.Set(allocation.HardExpiresAt)
+			if err := f.store.ConfirmReleased(ctx, confirmedRelease(allocation.RunID, allocation.ProxyName)); !errors.Is(err, ErrInvalidState) {
+				t.Fatalf("corrupt expired state accepted for release: %v", err)
+			}
+			owner, err := f.client.Get(ctx, f.store.resourceKey(allocation.Protocol, allocation.PublicEndpoint)).Result()
+			if err != nil || owner != allocation.RunID {
+				t.Fatalf("corrupt expired state deleted resource ownership: owner=%q err=%v", owner, err)
+			}
+		})
+	}
+}
+
+func TestRequestStopIsIdempotentForRetainedReleasedRun(t *testing.T) {
+	f := newRedisFixture(t, nil)
+	f.ready(t)
+	ctx := context.Background()
+	allocation, err := f.store.Allocate(ctx, allocationRequest("released-stop-retry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.RequestStop(ctx, allocation.RunID, allocation.CredentialToken); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.ConfirmReleased(ctx, confirmedRelease(allocation.RunID, allocation.ProxyName)); err != nil {
+		t.Fatal(err)
+	}
+	run, err := f.store.RequestStop(ctx, allocation.RunID, allocation.CredentialToken)
+	if err != nil || run.State != StateReleased || run.DesiredState != DesiredStopped {
+		t.Fatalf("released stop retry was not idempotent: %#v %v", run, err)
 	}
 }
 
@@ -673,7 +1291,7 @@ func TestConfirmedReleaseKeepsIdempotencyTombstoneWithoutRepeatingSuccessCount(t
 	if _, err := f.store.RequestStop(context.Background(), first.RunID, first.CredentialToken); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.store.ConfirmReleased(context.Background(), first.RunID, first.ProxyName); err != nil {
+	if err := f.store.ConfirmReleased(context.Background(), confirmedRelease(first.RunID, first.ProxyName)); err != nil {
 		t.Fatal(err)
 	}
 	before, err := readCounts(f, request.InstallationID, request.NetworkKey)
@@ -707,7 +1325,7 @@ func TestConfirmReleasedRejectsCorruptDynamicKeysOutsideTheirNamespace(t *testin
 	if err := f.client.HSet(context.Background(), f.store.runKey(allocation.RunID), "resource_key", sentinel).Err(); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.store.ConfirmReleased(context.Background(), allocation.RunID, allocation.ProxyName); !errors.Is(err, ErrInvalidState) {
+	if err := f.store.ConfirmReleased(context.Background(), confirmedRelease(allocation.RunID, allocation.ProxyName)); !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("corrupt dynamic key accepted: %v", err)
 	}
 	if got, err := f.client.Get(context.Background(), sentinel).Result(); err != nil || got != allocation.RunID {
@@ -749,7 +1367,7 @@ func TestConfirmReleasedRejectsAnotherRunsValidDynamicKeysBeforeAnyMutation(t *t
 			if err := f.client.HSet(context.Background(), f.store.runKey(first.RunID), field, otherKey).Err(); err != nil {
 				t.Fatal(err)
 			}
-			if err := f.store.ConfirmReleased(context.Background(), first.RunID, first.ProxyName); !errors.Is(err, ErrInvalidState) {
+			if err := f.store.ConfirmReleased(context.Background(), confirmedRelease(first.RunID, first.ProxyName)); !errors.Is(err, ErrInvalidState) {
 				t.Fatalf("another run's %s was accepted: %v", field, err)
 			}
 			if _, err := f.store.Authorize(context.Background(), second.RunID, second.CredentialToken, second.ProxyName); err != nil {
@@ -781,8 +1399,9 @@ func TestAllocateDoesNotOverwriteAnExistingProxyOwnerOnRandomCollision(t *testin
 	for i := 0; i < maxResourceAttempts; i++ {
 		appendCandidateRandom(byte(10+i), byte(50+i), byte(90+i), byte(130+i), byte(170+i))
 	}
-	f := newRedisFixture(t, func(config *Config) { config.Random = bytes.NewReader(stream) })
+	f := newRedisFixture(t, nil)
 	f.ready(t)
+	f.store.random = bytes.NewReader(stream)
 	first, err := f.store.Allocate(context.Background(), allocationRequest("proxy-owner-first"))
 	if err != nil {
 		t.Fatal(err)
@@ -802,7 +1421,7 @@ func TestPendingVerificationOrderingAndLimit(t *testing.T) {
 	f := newRedisFixture(t, nil)
 	f.ready(t)
 	var allocations []Allocation
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		req := allocationRequest(fmt.Sprintf("verify-%d", i))
 		req.InstallationID = fmt.Sprintf("verify-installation-%d", i)
 		req.NetworkKey = fmt.Sprintf("192.0.2.%d", 100+i)
@@ -825,19 +1444,218 @@ func TestPendingVerificationOrderingAndLimit(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ordering=%v want=%v", got, want)
 	}
-	all, err := f.store.PendingVerification(context.Background(), 10)
+	next, err := f.store.PendingVerification(context.Background(), 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ids := make([]string, 0, len(all))
-	for _, item := range all {
+	ids := make([]string, 0, len(next))
+	for _, item := range next {
 		ids = append(ids, item.RunID)
 	}
 	sort.Strings(ids)
-	want = []string{allocations[0].RunID, allocations[1].RunID, allocations[2].RunID}
+	want = []string{allocations[2].RunID, allocations[3].RunID}
 	sort.Strings(want)
 	if !reflect.DeepEqual(ids, want) {
-		t.Fatalf("verification index=%v want=%v", ids, want)
+		t.Fatalf("fixed head starved later verification work: got=%v want=%v", ids, want)
+	}
+	f.clock.Set(f.clock.Now().Add(time.Minute))
+	retried, err := f.store.PendingVerification(context.Background(), 4)
+	if err != nil || len(retried) != 4 {
+		t.Fatalf("abandoned claims were not made eligible again: %#v %v", retried, err)
+	}
+	ids = ids[:0]
+	for _, item := range retried {
+		ids = append(ids, item.RunID)
+	}
+	sort.Strings(ids)
+	want = want[:0]
+	for _, allocation := range allocations {
+		want = append(want, allocation.RunID)
+	}
+	sort.Strings(want)
+	if !reflect.DeepEqual(ids, want) {
+		t.Fatalf("abandoned claims were not all retried: got=%v want=%v", ids, want)
+	}
+}
+
+func TestPendingVerificationQuarantinesCorruptionAndContinuesPastLimit(t *testing.T) {
+	f := newRedisFixture(t, nil)
+	f.ready(t)
+	ctx := context.Background()
+	first, err := f.store.Allocate(ctx, allocationRequest("corrupt-verification-first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.RequestStop(ctx, first.RunID, first.CredentialToken); err != nil {
+		t.Fatal(err)
+	}
+	f.clock.Set(f.clock.Now().Add(time.Millisecond))
+	secondRequest := allocationRequest("corrupt-verification-second")
+	secondRequest.InstallationID = "second-verification-installation"
+	secondRequest.NetworkKey = "198.51.100.90"
+	second, err := f.store.Allocate(ctx, secondRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.RequestStop(ctx, second.RunID, second.CredentialToken); err != nil {
+		t.Fatal(err)
+	}
+	firstKey := f.store.runKey(first.RunID)
+	if err := f.client.HDel(ctx, firstKey, "proxy_name").Err(); err != nil {
+		t.Fatal(err)
+	}
+	items, err := f.store.PendingVerification(ctx, 1)
+	if !errors.Is(err, ErrVerificationCorrupt) || len(items) != 1 || items[0].RunID != second.RunID {
+		t.Fatalf("corrupt head starved trusted later work: items=%#v err=%v", items, err)
+	}
+	if _, err := f.client.ZScore(ctx, f.store.verificationKey(), firstKey).Result(); !errors.Is(err, redis.Nil) {
+		t.Fatalf("corrupt item remains in active queue: %v", err)
+	}
+	if _, err := f.client.ZScore(ctx, f.store.verificationQuarantineKey(), firstKey).Result(); err != nil {
+		t.Fatalf("corrupt item was not quarantined: %v", err)
+	}
+	if _, err := f.store.Allocate(ctx, allocationRequest("blocked-after-corruption")); !errors.Is(err, ErrResourcesUnverified) {
+		t.Fatalf("corruption did not block new allocations: %v", err)
+	}
+	counts, err := readCounts(f, "installation-a", "192.0.2.15")
+	if err != nil || counts.InstallationActive != 1 || counts.NetworkActive != 1 {
+		t.Fatalf("corrupt unknown ownership was silently released: %#v %v", counts, err)
+	}
+	if err := f.store.ConfirmReleased(ctx, confirmedRelease(second.RunID, second.ProxyName)); err != nil {
+		t.Fatalf("trusted later item could not be released while allocations blocked: %v", err)
+	}
+}
+
+func TestPendingVerificationBoundsCorruptWorkAndAdvancesAcrossBatches(t *testing.T) {
+	f := newRedisFixture(t, nil)
+	f.ready(t)
+	ctx := context.Background()
+	allocation, err := f.store.Allocate(ctx, allocationRequest("verification-budget"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.RequestStop(ctx, allocation.RunID, allocation.CredentialToken); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 3; index++ {
+		if err := f.client.ZAdd(ctx, f.store.verificationKey(), redis.Z{
+			Score: float64(f.clock.Now().UnixMilli() - int64(3-index)), Member: fmt.Sprintf("%s:run:invalid-%d", f.prefix, index),
+		}).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := f.store.PendingVerification(ctx, 1)
+	var corruption *VerificationCorruptionError
+	if len(items) != 0 || !errors.As(err, &corruption) || corruption.Count != 2 {
+		t.Fatalf("batch ignored its corruption examination budget: items=%#v err=%v", items, err)
+	}
+	if remaining, err := f.client.ZCard(ctx, f.store.verificationKey()).Result(); err != nil || remaining != 2 {
+		t.Fatalf("first batch examined beyond its bounded work: remaining=%d err=%v", remaining, err)
+	}
+	items, err = f.store.PendingVerification(ctx, 1)
+	if !errors.As(err, &corruption) || corruption.Count != 1 || len(items) != 1 || items[0].RunID != allocation.RunID {
+		t.Fatalf("corrupt items starved valid work across batches: items=%#v err=%v", items, err)
+	}
+}
+
+func TestPendingVerificationDoesNotQuarantineRenewedClaim(t *testing.T) {
+	for _, heartbeatDelay := range []time.Duration{time.Second, 75 * time.Second} {
+		t.Run(heartbeatDelay.String(), func(t *testing.T) {
+			f := newRedisFixture(t, nil)
+			f.ready(t)
+			ctx := context.Background()
+			allocation, err := f.store.Allocate(ctx, allocationRequest("verification-renewal"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := f.store.MarkConnected(ctx, allocation.RunID, allocation.ProxyName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			verificationTime := run.LeaseExpiresAt
+			f.clock.Set(verificationTime)
+			f.client.AddHook(&beforeVerificationInspectionHook{run: func() error {
+				// Model an in-flight heartbeat whose clock was captured before the
+				// worker claimed the old deadline. The second case equals the claim score.
+				f.clock.Set(verificationTime.Add(-heartbeatDelay))
+				_, err := f.store.Heartbeat(ctx, allocation.RunID, allocation.CredentialToken)
+				f.clock.Set(verificationTime)
+				return err
+			}})
+			items, err := f.store.PendingVerification(ctx, 1)
+			if err != nil || len(items) != 0 {
+				t.Fatalf("legitimate renewal was returned or quarantined as corruption: items=%#v err=%v", items, err)
+			}
+			if count, err := f.client.ZCard(ctx, f.store.verificationQuarantineKey()).Result(); err != nil || count != 0 {
+				t.Fatalf("renewed run was quarantined: count=%d err=%v", count, err)
+			}
+			if _, err := f.store.Authorize(ctx, allocation.RunID, allocation.CredentialToken, allocation.ProxyName); err != nil {
+				t.Fatalf("claim race blocked valid authorization: %v", err)
+			}
+		})
+	}
+}
+
+func TestVerificationEndpointMustMatchAllocatedProtocolNamespace(t *testing.T) {
+	store := &Store{publicDomain: "tunnel.test", tcpPorts: []uint16{21001}, udpPorts: []uint16{22001}}
+	for _, test := range []struct {
+		protocol Protocol
+		endpoint string
+		want     bool
+	}{
+		{ProtocolHTTP, "anon-aaaaaaaaaaaaaaaaaaaaaaaaaa.tunnel.test", true},
+		{ProtocolTCP, "tunnel.test:21001", true},
+		{ProtocolUDP, "tunnel.test:22001", true},
+		{ProtocolHTTP, "permanent.tunnel.test", false},
+		{ProtocolHTTP, "anon-a.tunnel.test", false},
+		{ProtocolHTTP, "anon-aaaaaaaaaaaaaaaaaaaaaaaaaa.other.test", false},
+		{ProtocolTCP, "tunnel.test:22001", false},
+		{ProtocolUDP, "tunnel.test:21001", false},
+		{ProtocolTCP, "tunnel.test:021001", false},
+		{ProtocolTCP, "other.test:21001", false},
+		{Protocol("invalid"), "tunnel.test:21001", false},
+	} {
+		if got := store.validPublicEndpoint(test.protocol, test.endpoint); got != test.want {
+			t.Fatalf("endpoint %q for %s: valid=%t want=%t", test.endpoint, test.protocol, got, test.want)
+		}
+	}
+}
+
+func TestConstructorRejectsEmptyProtocolPools(t *testing.T) {
+	f := newRedisFixture(t, nil)
+	base := Config{
+		Client: f.client, Prefix: f.prefix + ":pool",
+		CredentialPepper: []byte("credential-pepper-is-independent-32"),
+		ReplayKey:        []byte("replay-key-is-exactly-32-bytes!!"),
+		FenceOwnerToken:  []byte("fence-owner-token-is-independent-32"),
+		Clock:            f.clock.Now, Random: rand.Reader, PublicDomain: "tunnel.test",
+		TCPPorts: []uint16{21001}, UDPPorts: []uint16{22001},
+	}
+	for _, protocol := range []Protocol{ProtocolTCP, ProtocolUDP} {
+		config := base
+		if protocol == ProtocolTCP {
+			config.TCPPorts = nil
+		} else {
+			config.UDPPorts = nil
+		}
+		if _, err := NewStore(config); !errors.Is(err, ErrInvalidConfiguration) {
+			t.Fatalf("empty %s pool accepted: %v", protocol, err)
+		}
+	}
+}
+
+func TestNetworkKeyRejectsSpecialIPv6Prefixes(t *testing.T) {
+	for _, value := range []string{"::/64", "ff00::/64", "fe80::/64"} {
+		request := allocationRequest("invalid-ipv6")
+		request.NetworkKey = value
+		if _, err := hashAllocationRequest(request); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("special IPv6 prefix accepted: %q err=%v", value, err)
+		}
+	}
+	request := allocationRequest("valid-ipv6")
+	request.NetworkKey = "2001:db8::/64"
+	if _, err := hashAllocationRequest(request); err != nil {
+		t.Fatalf("canonical IPv6 /64 rejected: %v", err)
 	}
 }
 
@@ -847,7 +1665,11 @@ func TestConstructorRejectsSharedKeysAndInvalidInputsDoNotTouchRedis(t *testing.
 	if len(shared) != 32 {
 		t.Fatal("test key length")
 	}
-	_, err := NewStore(Config{Client: f.client, Prefix: f.prefix + ":other", CredentialPepper: shared, ReplayKey: shared, PublicDomain: "tunnel.test", Random: rand.Reader})
+	_, err := NewStore(Config{
+		Client: f.client, Prefix: f.prefix + ":other", CredentialPepper: shared, ReplayKey: shared,
+		FenceOwnerToken: []byte("fence-owner-token-is-independent-32"), PublicDomain: "tunnel.test",
+		Random: rand.Reader, TCPPorts: []uint16{1}, UDPPorts: []uint16{2},
+	})
 	if !errors.Is(err, ErrInvalidConfiguration) {
 		t.Fatalf("shared HMAC/AEAD key accepted: %v", err)
 	}
@@ -893,6 +1715,13 @@ func parseTestCredential(token string) (string, []byte, bool) {
 	return id, secret, true
 }
 
+func confirmedRelease(runID, proxyName string) ReleaseEvidence {
+	return ReleaseEvidence{
+		Kind: ReleaseEvidenceOfflineSample, RunID: runID, ProxyName: proxyName, ObservedOffline: true,
+		SampleAvailable: true, CurrentConnections: 0,
+	}
+}
+
 type testCounts struct {
 	InstallationActive      int64
 	NetworkActive           int64
@@ -903,8 +1732,8 @@ type testCounts struct {
 func readCounts(f *redisFixture, installationID, networkKey string) (testCounts, error) {
 	ctx := context.Background()
 	pipe := f.client.Pipeline()
-	installationActive := pipe.SCard(ctx, f.store.installationActiveKey(installationID))
-	networkActive := pipe.SCard(ctx, f.store.networkActiveKey(networkKey))
+	installationActive := pipe.ZCard(ctx, f.store.installationActiveKey(installationID))
+	networkActive := pipe.ZCard(ctx, f.store.networkActiveKey(networkKey))
 	installationRate := pipe.ZCard(ctx, f.store.installationRateKey(installationID))
 	networkRate := pipe.ZCard(ctx, f.store.networkRateKey(networkKey))
 	if _, err := pipe.Exec(ctx); err != nil {

@@ -6,7 +6,6 @@ import (
 	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
@@ -14,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -28,6 +28,7 @@ type Store struct {
 	prefix           string
 	credentialPepper []byte
 	replayAEAD       cipher.AEAD
+	fenceOwnerHash   string
 	clock            func() time.Time
 	random           io.Reader
 	publicDomain     string
@@ -38,8 +39,9 @@ type Store struct {
 var rawBase32 = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 func NewStore(config Config) (*Store, error) {
-	if config.Client == nil || !validPrefix(config.Prefix) || len(config.CredentialPepper) < 32 || len(config.ReplayKey) != 32 ||
-		subtle.ConstantTimeCompare(config.CredentialPepper, config.ReplayKey) == 1 || !validDomain(config.PublicDomain) {
+	if config.Client == nil || !validPrefix(config.Prefix) || len(config.CredentialPepper) < 32 || len(config.ReplayKey) != 32 || len(config.FenceOwnerToken) < 32 ||
+		hmac.Equal(config.CredentialPepper, config.ReplayKey) || hmac.Equal(config.CredentialPepper, config.FenceOwnerToken) ||
+		hmac.Equal(config.ReplayKey, config.FenceOwnerToken) || !validDomain(config.PublicDomain) {
 		return nil, ErrInvalidConfiguration
 	}
 	if config.Clock == nil {
@@ -64,6 +66,7 @@ func NewStore(config Config) (*Store, error) {
 		prefix:           config.Prefix,
 		credentialPepper: append([]byte(nil), config.CredentialPepper...),
 		replayAEAD:       aead,
+		fenceOwnerHash:   hashFenceOwner(config.FenceOwnerToken),
 		clock:            config.Clock,
 		random:           config.Random,
 		publicDomain:     config.PublicDomain,
@@ -111,6 +114,9 @@ func validDomain(value string) bool {
 }
 
 func validPortPool(ports []uint16) bool {
+	if len(ports) == 0 {
+		return false
+	}
 	seen := make(map[uint16]struct{}, len(ports))
 	for _, port := range ports {
 		if port == 0 {
@@ -124,16 +130,98 @@ func validPortPool(ports []uint16) bool {
 	return true
 }
 
-func (s *Store) MarkResourcesVerified(ctx context.Context) error {
-	if err := s.client.Set(ctx, s.readyKey(), "anonymous_resources_verified_v1", 0).Err(); err != nil {
+func hashFenceOwner(token []byte) string {
+	hash := sha256.New()
+	_, _ = io.WriteString(hash, "anonymous-resource-fence-owner-v1\x00")
+	_, _ = hash.Write(token)
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func (s *Store) ObserveResourceFence(ctx context.Context) (ResourceFence, error) {
+	values, err := observeResourceFenceScript.Run(ctx, s.client, []string{s.readyKey()}).Slice()
+	if err != nil || len(values) != 4 {
+		return ResourceFence{}, ErrUnavailable
+	}
+	code, ok := parseInt64(values[0])
+	redisRunID, runOK := asString(values[1])
+	revision, revisionOK := asString(values[2])
+	generation, generationOK := parseInt64(values[3])
+	if !ok || !runOK || !revisionOK || !generationOK || generation < 0 || !validRedisRunID(redisRunID) {
+		return ResourceFence{}, ErrInvalidState
+	}
+	if code == -1 {
+		return ResourceFence{}, ErrInvalidState
+	}
+	if code != 1 || revision != "" && !validRandomIdentifier(revision, "afr_", 16) {
+		return ResourceFence{}, ErrUnavailable
+	}
+	return ResourceFence{RedisRunID: redisRunID, Revision: revision, Generation: generation}, nil
+}
+
+func (s *Store) MarkResourcesVerified(ctx context.Context, observed ResourceFence) (ResourceFence, error) {
+	if !validRedisRunID(observed.RedisRunID) || observed.Generation < 0 || observed.Revision != "" && !validRandomIdentifier(observed.Revision, "afr_", 16) {
+		return ResourceFence{}, ErrInvalidRequest
+	}
+	if err := s.validateRedisDeployment(ctx); err != nil {
+		return ResourceFence{}, err
+	}
+	revision, err := s.randomName("afr_", 16)
+	if err != nil {
+		return ResourceFence{}, err
+	}
+	values, err := markResourcesVerifiedScript.Run(ctx, s.client, []string{s.readyKey()},
+		observed.RedisRunID, observed.Revision, s.fenceOwnerHash, revision, observed.Generation).Slice()
+	if err != nil || len(values) != 2 {
+		return ResourceFence{}, ErrUnavailable
+	}
+	code, ok := parseInt64(values[0])
+	currentRunID, runOK := asString(values[1])
+	if !ok || !runOK || !validRedisRunID(currentRunID) {
+		return ResourceFence{}, ErrUnavailable
+	}
+	if code == -1 || code == -2 || code == -3 {
+		return ResourceFence{}, ErrFenceConflict
+	}
+	if code != 1 || currentRunID != observed.RedisRunID {
+		return ResourceFence{}, ErrInvalidState
+	}
+	return ResourceFence{RedisRunID: currentRunID, Revision: revision, Generation: observed.Generation}, nil
+
+}
+
+func (s *Store) validateRedisDeployment(ctx context.Context) error {
+	info, err := s.client.Info(ctx, "server", "replication").Result()
+	if err != nil {
 		return ErrUnavailable
+	}
+	fields := make(map[string]string)
+	for _, line := range strings.Split(info, "\r\n") {
+		name, value, ok := strings.Cut(line, ":")
+		if ok {
+			fields[name] = value
+		}
+	}
+	if fields["redis_mode"] != "standalone" || fields["role"] != "master" || fields["connected_slaves"] != "0" {
+		return ErrResourcesUnverified
+	}
+	configuration, err := s.client.ConfigGet(ctx, "maxmemory-policy").Result()
+	if err != nil {
+		return ErrUnavailable
+	}
+	if configuration["maxmemory-policy"] != "noeviction" {
+		return ErrResourcesUnverified
 	}
 	return nil
 }
 
 func (s *Store) BlockAllocations(ctx context.Context) error {
-	if err := s.client.Del(ctx, s.readyKey()).Err(); err != nil {
+	values, err := blockAllocationsScript.Run(ctx, s.client, []string{s.readyKey()}).Slice()
+	if err != nil || len(values) != 1 {
 		return ErrUnavailable
+	}
+	code, ok := parseInt64(values[0])
+	if !ok || code != 1 {
+		return ErrInvalidState
 	}
 	return nil
 }
@@ -148,6 +236,9 @@ func (s *Store) Allocate(ctx context.Context, request AllocateRequest) (Allocati
 		return Allocation{}, err
 	}
 	indexKey := s.replayKey(request.InstallationID, request.NetworkKey, request.IdempotencyKey)
+	if replayed, found, err := s.lookupReplay(ctx, indexKey, requestHash, now); found || err != nil {
+		return replayed, err
+	}
 	for attempt := 0; attempt < maxResourceAttempts; attempt++ {
 		candidate, err := s.newCandidate(request.Protocol, now)
 		if err != nil {
@@ -183,6 +274,29 @@ func (s *Store) Allocate(ctx context.Context, request AllocateRequest) (Allocati
 		return allocation, err
 	}
 	return Allocation{}, ErrResourceUnavailable
+}
+
+func (s *Store) lookupReplay(ctx context.Context, key, requestHash string, now time.Time) (Allocation, bool, error) {
+	values, err := lookupReplayScript.Run(ctx, s.client, []string{s.readyKey(), key, s.verificationKey()},
+		now.UnixMilli(), requestHash, s.prefix+":run:").Slice()
+	if err != nil || len(values) == 0 {
+		return Allocation{}, false, ErrUnavailable
+	}
+	code, ok := parseInt64(values[0])
+	if !ok {
+		return Allocation{}, false, ErrUnavailable
+	}
+	if code == 0 {
+		return Allocation{}, false, nil
+	}
+	allocation, retry, err := s.decodeAllocateResult(key, requestHash, now, values)
+	if retry {
+		return Allocation{}, false, ErrInvalidState
+	}
+	if err != nil {
+		return Allocation{}, true, err
+	}
+	return allocation, true, nil
 }
 
 type allocationCandidate struct {
@@ -245,6 +359,33 @@ func (s *Store) newPublicEndpoint(protocol Protocol) (string, error) {
 	default:
 		return "", ErrInvalidRequest
 	}
+}
+
+func (s *Store) validPublicEndpoint(protocol Protocol, endpoint string) bool {
+	if protocol == ProtocolHTTP {
+		label, ok := strings.CutSuffix(endpoint, "."+s.publicDomain)
+		return ok && validRandomIdentifier(label, "anon-", 16)
+	}
+	ports := s.tcpPorts
+	if protocol == ProtocolUDP {
+		ports = s.udpPorts
+	} else if protocol != ProtocolTCP {
+		return false
+	}
+	host, encodedPort, err := net.SplitHostPort(endpoint)
+	if err != nil || host != s.publicDomain {
+		return false
+	}
+	port, err := strconv.ParseUint(encodedPort, 10, 16)
+	if err != nil || strconv.FormatUint(port, 10) != encodedPort {
+		return false
+	}
+	for _, allowed := range ports {
+		if uint16(port) == allowed {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) randomPort(ports []uint16) (uint16, error) {
@@ -315,7 +456,24 @@ func validNetworkKey(value string) bool {
 		return addr.Is4() && !addr.IsUnspecified() && !addr.IsMulticast() && addr.String() == value
 	}
 	prefix, err := netip.ParsePrefix(value)
-	return err == nil && prefix.Addr().Is6() && prefix.Addr().Zone() == "" && prefix.Bits() == 64 && prefix == prefix.Masked() && prefix.String() == value
+	if err != nil {
+		return false
+	}
+	addr := prefix.Addr()
+	return addr.Is6() && addr.Zone() == "" && !addr.IsUnspecified() && !addr.IsMulticast() && !addr.IsLinkLocalUnicast() &&
+		prefix.Bits() == 64 && prefix == prefix.Masked() && prefix.String() == value
+}
+
+func validRedisRunID(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for _, char := range value {
+		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) now() (time.Time, error) {
@@ -346,8 +504,14 @@ func (s *Store) compositeDigest(values ...string) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-func (s *Store) readyKey() string           { return s.prefix + ":resources:verified" }
-func (s *Store) verificationKey() string    { return s.prefix + ":verification" }
+func (s *Store) readyKey() string        { return s.prefix + ":resources:verified" }
+func (s *Store) verificationKey() string { return s.prefix + ":verification" }
+func (s *Store) verificationQuarantineKey() string {
+	return s.prefix + ":verification:quarantine"
+}
+func (s *Store) verificationQuarantineDetailsKey() string {
+	return s.prefix + ":verification:quarantine:details"
+}
 func (s *Store) runKey(runID string) string { return s.prefix + ":run:" + s.digest(runID) }
 func (s *Store) replayKey(installationID, networkKey, idempotencyKey string) string {
 	return s.prefix + ":replay:" + s.compositeDigest(installationID, networkKey, idempotencyKey)
@@ -507,10 +671,23 @@ func (s *Store) decodeAllocateResult(key, requestHash string, now time.Time, val
 		return Allocation{}, false, ErrResourcesUnverified
 	case -2:
 		return Allocation{}, false, ErrIdempotencyConflict
-	case -3:
-		return Allocation{}, false, ErrInstallationLimit
-	case -4:
-		return Allocation{}, false, ErrNetworkLimit
+	case -3, -4:
+		if len(values) != 2 {
+			return Allocation{}, false, ErrUnavailable
+		}
+		earliest, ok := parseInt64(values[1])
+		if !ok {
+			return Allocation{}, false, ErrUnavailable
+		}
+		retry := time.Duration(earliest-now.UnixMilli()) * time.Millisecond
+		if retry < time.Millisecond {
+			retry = time.Millisecond
+		}
+		scope := LimitInstallation
+		if code == -4 {
+			scope = LimitNetwork
+		}
+		return Allocation{}, false, &ConcurrencyLimitError{Scope: scope, RetryAfter: retry}
 	case -5, -6:
 		if len(values) != 2 {
 			return Allocation{}, false, ErrUnavailable
