@@ -8,21 +8,55 @@
 
 | 仓库 | 已验证的功能基准 | 当前边界 |
 | --- | --- | --- |
-| `nodelane-tunneld` | 本地 `main`：`c876e4e`，主要功能提交 `172038e` | 新控制面和控制台已接入；仍有下述缺口，未发布或部署 |
+| `nodelane-tunneld` | 功能基准 `c876e4e`，主要功能提交 `172038e`；发布源码 `1a64c38` | `0.5.0` 镜像和 `stable` 已发布；生产未部署，仍有下述缺口 |
 | `auth` | 本地 `main`：`a22e375`，实现提交 `0a7934e` | Logto 部署包、离线校验和操作手册完成；不是已配置好的真实身份租户 |
 | `nodelane-www` | 本地 `main`：`4c2f640` | 静态主站已增加保留语言的控制台入口，不读取 Session |
 
 上述提交是功能证据基准；本次文档清理及后续提交可能使 HEAD 前进。合入本地 `main`、推送 Git、发布镜像/客户端、部署和公网验收是不同状态。
 
-## 优先处理的缺口
+## 优先处理的缺口与发布边界
 
 1. **ANON-05 尚未完成。** 规范仍要求匿名当前运行统计在本地 `nt` 展示，但 [CLI 输出](../cmd/nt/commands_dependencies.go)和 [Runner 状态](../internal/runclient/runner.go)只有运行标识、地址、到期时间及生命周期状态，没有上传/下载或连接统计。注册路由的流量测试不能代替此项。继续实现或取消此要求须明确处理；若需要改变接口、统计来源或原生复用边界，先与用户确认，不能恢复旧监控/日志系统来绕过约束。
 2. **AC-UI-01 尚未完成截图目视验收。** 已检查真实浏览器的尺寸、12 语言、RTL、复制、语言切换及 Escape 焦点恢复，但上一轮执行环境无法读取图片。不能把几何检查或旧截图写成像素级验收通过。
 3. **真实身份联调仅部分完成。** 真实 Google 登录、第二应用 SSO、邮箱验证码注册，以及 Linux 容器内 CLI Device Flow → 跨进程刷新 → 路由运行 → 退出撤销已通过。已有邮箱账号的独立再次登录、错误/过期/重用验证码、Google 主动绑定/冲突隔离、Access Token 真实到期拒绝和浏览器真实退出仍待验收；不把 CLI 退出当作浏览器退出。详见下节和 [auth 操作手册](../../auth/README.md)。
 4. **真实部署验收未执行。** DNS/TLS、可信代理、内网管理面、frps 重启/UTC 跨日统计、全新机器上的三种公开安装命令及生产停止传播仍须按规范验收。编译通过不等于 ARM64 实机通过。
-5. **0.5.0 发布准备。** 2026-09-06 用户已授权提交并推送当前 Tunnel Git 改动、发布镜像；控制面镜像及 `client-version.txt` 均采用 `0.5.0`，内置新客户端不覆盖旧 `0.4.4` 字节。发布结果须按实际 Git 与 Registry 回读记录；本次不授权生产部署、密钥轮换、提供方修改或真实数据库清理，也不额外触发 `nt-v*` GitHub 客户端 Release。
+5. **0.5.0 Git 与镜像发布已完成。** 2026-09-06 用户授权的 Tunnel Git 推送、版本镜像和 `stable` 发布均已回读确认；控制面及内置 `nt` 均为 `0.5.0`，不覆盖旧 `0.4.4` 客户端字节。没有额外触发 `nt-v*` GitHub 客户端 Release，也没有执行生产部署、密钥轮换、提供方修改或真实数据库清理。详细证据与新部署要求见下一节。
 
 不要将剩余工作概括成“仅差上线配置”，也不要因全部现有测试通过而宣称全部需求闭环。
+
+## 0.5.0 发布与部署准备
+
+2026-09-06 用户授权本仓库 Git 和镜像发布；发布源码提交 `1a64c38` 已推送并回读确认，后续本节记录是文档提交。镜像从该源码提交的纯 Git 快照构建，排除工作目录中的旧工作树、未跟踪 `nt` 二进制和私密输入。以下本地联调章节保留各阶段发生时的状态，不是当前发布状态。
+
+- Registry：`docker.nodelane.net/nodelane/tunneld:0.5.0` 与 `:stable` 均已回读为 `sha256:37cc92e5486f17b31852087822070d447df0ab911f3d0f64024f567703d31521`，保留 `linux/amd64`、`linux/arm64` 及两份构建证明。上传期间的 `522` / `524` 经同一份镜像按架构补传恢复，没有重建或更换客户端包字节。
+- 发布检查：真实受守卫保护的 PostgreSQL/Redis 下 Go 全套测试、`go vet ./...`、双程序构建通过；Windows 测试有两项预期辅助/预览跳过，Linux 专属测试不在本次宿主机套件内。Web 源测试 29 通过、1 项 POSIX 跳过，构建测试 22 通过，嵌入字节一致性 1 通过，部署配置回归通过。
+- 拉取后隔离验证：正常配置、原版 frps 和全新临时 PostgreSQL/Redis 完成匿名初始化及正常启动；`/healthz`、`/api/v1/client-config`、旧/私有路径拒绝、24 个公开前端文件逐字节匹配均通过。`/releases/stable.txt` 为 `0.5.0`，`/run.sh` 为 5530 字节且 `CR=0`。
+- 四个平台客户端包的 SHA-256、原版 frp 许可证和目标架构均通过；Windows/amd64、Linux/amd64 及模拟 Linux/arm64 的 `nt --version` 为 `0.5.0`，两个 Linux 架构的服务端版本也一致。Windows/arm64 只验证包及构建目标，不冒充 ARM64 实机验收。所有本次临时容器、网络、证书和密钥已清理，没有消费真实身份凭据。
+
+相对旧版，这不是只替换镜像的升级。正式部署前必须准备：
+
+- 新的 Tunnel PostgreSQL 数据库与 `DATABASE_URL`，不能复用旧版业务数据库；首次正常启动自动初始化最终第一版 Schema，不提供旧数据导入或自动清库。
+- 新的 `REDIS_PREFIX` 及实际 Redis 连接。Redis 必须为无副本的 standalone master，`maxmemory-policy=noeviction`，服务账号允许 Lua、`INFO`、`SCAN`、`CONFIG GET` 等现有操作；换前缀不能绕过实例约束。
+- [.env.example](../.env.example) 中的七个互异密钥：`CONTROL_LAUNCH_PEPPER`、`CONTROL_RUN_PEPPER`、`CONTROL_REPLAY_KEY`、`SESSION_ENCRYPTION_KEY`、`ANONYMOUS_CREDENTIAL_PEPPER`、`ANONYMOUS_REPLAY_KEY`、`ANONYMOUS_FENCE_OWNER_TOKEN`；每个是 32 字节密码学随机值，使用 base64 或无填充 base64url，私密保存并保持稳定。
+- 正式 `PUBLIC_ORIGIN`、`OIDC_ISSUER`、`OIDC_WEB_CLIENT_ID`、`OIDC_WEB_CLIENT_SECRET`、`OIDC_NATIVE_CLIENT_ID`。Web 与 Native 必须为独立真实应用；Web 回调为 `https://tunnel.nodelane.net/auth/callback`，退出回调为 `https://tunnel.nodelane.net/`。Native 启用 Device Flow；API Resource 固定为 `https://tunnel.nodelane.net/api`，默认角色授予 `routes:read` / `runs:start`。Logto、邮箱验证码、Google、Account Center 和认证日志策略按 [auth 手册](../../auth/README.md)独立完成，不能复用本地测试凭据冒充生产配置。
+- 原版 frps `0.70.0` 及本次完整 [frps.toml](../deploy/frps.toml)，同步配置管理账号、强制 TLS、CA/证书/私钥路径及全部六个插件回调。模板与公有证书须在相同绝对路径只读挂载且非 root Tunnel 可读；私钥只挂 frps。移除非空 `FRP_AUTH_TOKEN`，不再使用 `DEV_MODE`、`PUBLIC_SCHEME`、`TOKEN_PEPPER`、`TUNNEL_JWT_SECRET` 或 `ADMIN_TOKEN` 作为新控制面配置。
+- Linux host network 与正式 DNS/TLS。控制站 HTTPS 转发到 `127.0.0.1:9000`；通配 HTTP 隧道转发到 `8080` 并保留 Host，7000 为原始 TCP。9001 插件、7500 管理面、8080 原生 HTTP 入口及数据库/Redis 不直接公开；代理覆盖 `X-Real-IP` 并匹配 `TRUSTED_PROXY_CIDRS`。旧 CLI/API 不兼容，部署时同步更新客户端。
+
+首次部署命令说明，**本次未在生产执行**。私密环境文件须先将 `TUNNELD_IMAGE` 设为 `docker.nodelane.net/nodelane/tunneld:0.5.0` 并填齐上述真实配置；正式 Logto 必须另行就绪。维护窗口中确认旧客户端已停止、旧 frps 已退出、新数据面及新匿名命名空间干净后执行：
+
+```sh
+dc() {
+  docker compose --env-file /etc/nodelane/tunneld.env \
+    -f deploy/compose.yaml -f deploy/compose.registry.yaml "$@"
+}
+dc config --quiet
+dc pull
+dc up -d frps
+dc run --rm --no-deps tunneld anonymous-resources init --confirm-clean-data-plane
+dc up -d tunneld
+```
+
+匿名初始化只针对确认过的全新命名空间，重复执行会拒绝；不是清理或重启命令。最后一步首次初始化 PostgreSQL。生产切换、真实身份/公开安装命令、ARM64 实机以及本节上方的未完验收仍须单独完成。
 
 ## 本轮身份联调准备
 
