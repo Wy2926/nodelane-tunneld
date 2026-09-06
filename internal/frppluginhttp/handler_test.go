@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -148,6 +149,42 @@ func TestHandlerBoundsDispatchTimeAndCancelsDependencyContext(t *testing.T) {
 	}
 }
 
+func TestHandlerBoundsNonCooperativeDispatchersWithInFlightGate(t *testing.T) {
+	dispatcher := &stuckDispatcher{block: make(chan struct{}), finished: make(chan struct{}, 2)}
+	handler, err := New(Options{Dispatcher: dispatcher, DispatchTimeout: 10 * time.Millisecond, MaxInFlight: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, officialRequest(`{"version":"0.1.0","op":"Login","content":{}}`))
+		assertRejectedReason(t, recorder, UnavailableReason)
+	}
+	if got := dispatcher.started.Load(); got != 2 {
+		t.Fatalf("started dispatchers = %d, want 2", got)
+	}
+
+	started := time.Now()
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, officialRequest(`{"version":"0.1.0","op":"Login","content":{}}`))
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("saturated handler did not reject promptly: %s", elapsed)
+	}
+	assertRejectedReason(t, recorder, UnavailableReason)
+	if got := dispatcher.started.Load(); got != 2 {
+		t.Fatalf("in-flight gate started an extra dispatcher: %d", got)
+	}
+
+	close(dispatcher.block)
+	for range 2 {
+		select {
+		case <-dispatcher.finished:
+		case <-time.After(time.Second):
+			t.Fatal("stuck dispatcher did not finish after test release")
+		}
+	}
+}
+
 func TestHandlerRecoversResponseMarshalPanicWithGenericRejection(t *testing.T) {
 	dispatcher := &recordingDispatcher{response: frpplugin.Response{Content: panicJSONMarshaler{}}}
 	handler := mustHandler(t, dispatcher)
@@ -174,6 +211,9 @@ func TestHandlerRejectsNilDispatcher(t *testing.T) {
 	}
 	if handler, err := New(Options{Dispatcher: &recordingDispatcher{}, DispatchTimeout: -time.Second}); handler != nil || !errors.Is(err, ErrInvalidConfiguration) {
 		t.Fatalf("New(negative timeout) = (%v, %v), want nil and ErrInvalidConfiguration", handler, err)
+	}
+	if handler, err := New(Options{Dispatcher: &recordingDispatcher{}, MaxInFlight: -1}); handler != nil || !errors.Is(err, ErrInvalidConfiguration) {
+		t.Fatalf("New(negative max in flight) = (%v, %v), want nil and ErrInvalidConfiguration", handler, err)
 	}
 }
 
@@ -204,6 +244,19 @@ type panicJSONMarshaler struct{}
 
 func (panicJSONMarshaler) MarshalJSON() ([]byte, error) {
 	panic("marshal-secret")
+}
+
+type stuckDispatcher struct {
+	block    chan struct{}
+	finished chan struct{}
+	started  atomic.Int64
+}
+
+func (d *stuckDispatcher) Dispatch(context.Context, frpplugin.Request) (frpplugin.Response, error) {
+	d.started.Add(1)
+	<-d.block
+	d.finished <- struct{}{}
+	return frpplugin.Response{Unchange: true}, nil
 }
 
 func assertRejectedReason(t *testing.T, recorder *httptest.ResponseRecorder, reason string) {

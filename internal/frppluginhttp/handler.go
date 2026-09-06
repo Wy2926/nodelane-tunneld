@@ -22,9 +22,13 @@ const (
 	maxQueryBytes          = 256
 	defaultDispatchTimeout = 3 * time.Second
 	maxDispatchTimeout     = 30 * time.Second
+	defaultMaxInFlight     = 128
+	maxMaxInFlight         = 4096
 )
 
 var ErrInvalidConfiguration = errors.New("invalid frp plugin HTTP configuration")
+
+var errDispatcherSaturated = errors.New("frp plugin dispatcher is saturated")
 
 type Dispatcher interface {
 	Dispatch(context.Context, frpplugin.Request) (frpplugin.Response, error)
@@ -33,21 +37,31 @@ type Dispatcher interface {
 type Handler struct {
 	dispatcher      Dispatcher
 	dispatchTimeout time.Duration
+	inFlight        chan struct{}
 }
 
 type Options struct {
 	Dispatcher      Dispatcher
 	DispatchTimeout time.Duration
+	MaxInFlight     int
 }
 
 func New(options Options) (*Handler, error) {
-	if nilDispatcher(options.Dispatcher) || options.DispatchTimeout < 0 || options.DispatchTimeout > maxDispatchTimeout {
+	if nilDispatcher(options.Dispatcher) || options.DispatchTimeout < 0 || options.DispatchTimeout > maxDispatchTimeout ||
+		options.MaxInFlight < 0 || options.MaxInFlight > maxMaxInFlight {
 		return nil, ErrInvalidConfiguration
 	}
 	if options.DispatchTimeout == 0 {
 		options.DispatchTimeout = defaultDispatchTimeout
 	}
-	return &Handler{dispatcher: options.Dispatcher, dispatchTimeout: options.DispatchTimeout}, nil
+	if options.MaxInFlight == 0 {
+		options.MaxInFlight = defaultMaxInFlight
+	}
+	return &Handler{
+		dispatcher:      options.Dispatcher,
+		dispatchTimeout: options.DispatchTimeout,
+		inFlight:        make(chan struct{}, options.MaxInFlight),
+	}, nil
 }
 
 func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -94,6 +108,14 @@ type dispatchResult struct {
 }
 
 func (h *Handler) dispatch(parent context.Context, request frpplugin.Request) (frpplugin.Response, error) {
+	if err := parent.Err(); err != nil {
+		return frpplugin.Response{}, err
+	}
+	select {
+	case h.inFlight <- struct{}{}:
+	default:
+		return frpplugin.Response{}, errDispatcherSaturated
+	}
 	ctx, cancel := context.WithTimeout(parent, h.dispatchTimeout)
 	defer cancel()
 	resultChannel := make(chan dispatchResult, 1)
@@ -103,6 +125,7 @@ func (h *Handler) dispatch(parent context.Context, request frpplugin.Request) (f
 			if recover() != nil {
 				result = dispatchResult{err: errors.New("frp plugin dispatcher panicked")}
 			}
+			<-h.inFlight
 			resultChannel <- result
 		}()
 		result.response, result.err = h.dispatcher.Dispatch(ctx, request)
