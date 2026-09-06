@@ -14,6 +14,7 @@ import (
 	"mime"
 	"net/http"
 	"net/netip"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -52,10 +53,23 @@ type Server struct {
 }
 
 func New(options Options) (*Server, error) {
-	if options.Store == nil || options.SourceIP == nil || options.Banned == nil {
+	if dependencyIsNil(options.Store) || options.SourceIP == nil || options.Banned == nil {
 		return nil, errors.New("anonymous API dependencies are required")
 	}
 	return &Server{store: options.Store, sourceIP: options.SourceIP, banned: options.Banned}, nil
+}
+
+func dependencyIsNil(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }
 
 func (s *Server) Handler() http.Handler { return s }
@@ -119,19 +133,8 @@ func (s *Server) allocate(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	ip, err := s.sourceIP(r)
-	if err != nil || !validSourceIP(ip) {
-		s.writeError(w, http.StatusServiceUnavailable, "dependency_unavailable")
-		return
-	}
-	ip = ip.Unmap()
-	banned, err := s.banned(r.Context(), ip)
-	if err != nil {
-		s.writeError(w, http.StatusServiceUnavailable, "dependency_unavailable")
-		return
-	}
-	if banned {
-		s.writeError(w, http.StatusForbidden, "ip_banned")
+	ip, ok := s.sourceAllowed(w, r)
+	if !ok {
 		return
 	}
 	result, err := s.store.Allocate(r.Context(), anonymous.AllocateRequest{
@@ -160,8 +163,6 @@ func (s *Server) allocate(w http.ResponseWriter, r *http.Request) {
 			"proxy_name":          result.ProxyName,
 			"public_endpoint":     result.PublicEndpoint,
 			"protocol":            result.Protocol,
-			"state":               anonymous.StateReserved,
-			"desired_state":       anonymous.DesiredRunning,
 			"created_at":          result.CreatedAt.UTC(),
 			"connect_deadline_at": result.ConnectDeadlineAt.UTC(),
 			"hard_expires_at":     result.HardExpiresAt.UTC(),
@@ -195,6 +196,9 @@ func (s *Server) runOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if parts[1] == "heartbeat" {
+		if _, ok := s.sourceAllowed(w, r); !ok {
+			return
+		}
 		result, err := s.store.Heartbeat(r.Context(), parts[0], token)
 		if err != nil {
 			s.writeAnonymousError(w, err)
@@ -227,6 +231,25 @@ func (s *Server) runOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"run": runDTO(run), "stopped": true})
+}
+
+func (s *Server) sourceAllowed(w http.ResponseWriter, r *http.Request) (netip.Addr, bool) {
+	ip, err := s.sourceIP(r)
+	if err != nil || !validSourceIP(ip) {
+		s.writeError(w, http.StatusServiceUnavailable, "dependency_unavailable")
+		return netip.Addr{}, false
+	}
+	ip = ip.Unmap()
+	banned, err := s.banned(r.Context(), ip)
+	if err != nil {
+		s.writeError(w, http.StatusServiceUnavailable, "dependency_unavailable")
+		return netip.Addr{}, false
+	}
+	if banned {
+		s.writeError(w, http.StatusForbidden, "ip_banned")
+		return netip.Addr{}, false
+	}
+	return ip, true
 }
 
 func validAllocation(result anonymous.Allocation) bool {

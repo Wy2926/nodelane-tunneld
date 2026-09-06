@@ -69,8 +69,6 @@ func TestAllocateDerivesNetworkIdentityAndReturnsExplicitCredential(t *testing.T
 	var body struct {
 		Run struct {
 			ID             string `json:"id"`
-			State          string `json:"state"`
-			DesiredState   string `json:"desired_state"`
 			ProxyName      string `json:"proxy_name"`
 			PublicEndpoint string `json:"public_endpoint"`
 		} `json:"run"`
@@ -80,7 +78,7 @@ func TestAllocateDerivesNetworkIdentityAndReturnsExplicitCredential(t *testing.T
 	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Run.ID != testRunID || body.Run.State != "reserved" || body.Run.DesiredState != "running" || body.Run.ProxyName != testProxyName || body.CredentialToken != testToken || body.Replayed {
+	if body.Run.ID != testRunID || body.Run.ProxyName != testProxyName || body.CredentialToken != testToken || body.Replayed || strings.Contains(recorder.Body.String(), `"state"`) {
 		t.Fatalf("response=%#v", body)
 	}
 }
@@ -199,6 +197,63 @@ func TestHeartbeatAndStopRequireMatchingAnonymousBearer(t *testing.T) {
 	}
 }
 
+func TestReservedHeartbeatOmitsMissingLeaseDeadline(t *testing.T) {
+	now := time.Date(2026, 9, 6, 1, 2, 3, 0, time.UTC)
+	store := &fakeStore{
+		allocate: func(context.Context, anonymous.AllocateRequest) (anonymous.Allocation, error) {
+			t.Fatal("allocate called")
+			return anonymous.Allocation{}, nil
+		},
+		heartbeat: func(_ context.Context, runID, _ string) (anonymous.HeartbeatResult, error) {
+			return anonymous.HeartbeatResult{RunID: runID, DesiredState: anonymous.DesiredRunning, HardExpiresAt: now.Add(time.Hour)}, nil
+		},
+		stop: unexpectedStop(t),
+	}
+	server := newTestServer(t, store, netip.MustParseAddr("192.0.2.4"), false, nil)
+	recorder := request(t, server.Handler(), http.MethodPost, "/api/v1/runs/"+testRunID+"/heartbeat", `{}`, func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+testToken)
+	})
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "lease_expires_at") || strings.Contains(recorder.Body.String(), "0001-01-01") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHeartbeatRechecksBanButStopRemainsAvailable(t *testing.T) {
+	now := time.Date(2026, 9, 6, 1, 2, 3, 0, time.UTC)
+	heartbeatCalled, stopCalled := false, false
+	store := &fakeStore{
+		allocate: func(context.Context, anonymous.AllocateRequest) (anonymous.Allocation, error) {
+			t.Fatal("allocate called")
+			return anonymous.Allocation{}, nil
+		},
+		heartbeat: func(context.Context, string, string) (anonymous.HeartbeatResult, error) {
+			heartbeatCalled = true
+			return anonymous.HeartbeatResult{}, nil
+		},
+		stop: func(_ context.Context, runID, _ string) (anonymous.Run, error) {
+			stopCalled = true
+			return anonymous.Run{
+				RunID: runID, ProxyName: testProxyName, PublicEndpoint: "anon-aaaaaaaaaaaaaaaaaaaaaaaaaa.tunnel.test",
+				Protocol: anonymous.ProtocolHTTP, State: anonymous.StateStopping, DesiredState: anonymous.DesiredStopped,
+				CreatedAt: now, HardExpiresAt: now.Add(time.Hour),
+			}, nil
+		},
+	}
+	server := newTestServer(t, store, netip.MustParseAddr("192.0.2.4"), true, nil)
+	heartbeat := request(t, server.Handler(), http.MethodPost, "/api/v1/runs/"+testRunID+"/heartbeat", `{}`, func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+testToken)
+	})
+	if heartbeat.Code != http.StatusForbidden || errorCode(t, heartbeat) != "ip_banned" || heartbeatCalled {
+		t.Fatalf("heartbeat status=%d body=%s called=%v", heartbeat.Code, heartbeat.Body.String(), heartbeatCalled)
+	}
+	stop := request(t, server.Handler(), http.MethodPost, "/api/v1/runs/"+testRunID+"/stop", `{}`, func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+testToken)
+	})
+	if stop.Code != http.StatusOK || !stopCalled {
+		t.Fatalf("stop status=%d body=%s called=%v", stop.Code, stop.Body.String(), stopCalled)
+	}
+}
+
 func TestStableAnonymousErrorMapping(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -258,6 +313,32 @@ func TestDependencyAndCredentialFailuresFailClosed(t *testing.T) {
 	allocation := request(t, server.Handler(), http.MethodPost, "/api/v1/anonymous/runs", `{"installation_id":"install-1","protocol":"http","local_host":"localhost","local_port":3000}`, func(r *http.Request) { r.Header.Set("Idempotency-Key", "x") })
 	if allocation.Code != http.StatusServiceUnavailable || errorCode(t, allocation) != "dependency_unavailable" {
 		t.Fatalf("allocation=%d %s", allocation.Code, allocation.Body.String())
+	}
+}
+
+func TestNewRejectsMissingAndTypedNilDependencies(t *testing.T) {
+	valid := Options{
+		Store:    &fakeStore{},
+		SourceIP: func(*http.Request) (netip.Addr, error) { return netip.MustParseAddr("192.0.2.1"), nil },
+		Banned:   func(context.Context, netip.Addr) (bool, error) { return false, nil },
+	}
+	for name, mutate := range map[string]func(*Options){
+		"store":  func(options *Options) { options.Store = nil },
+		"source": func(options *Options) { options.SourceIP = nil },
+		"ban":    func(options *Options) { options.Banned = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			options := valid
+			mutate(&options)
+			if server, err := New(options); err == nil || server != nil {
+				t.Fatalf("New = (%v, %v), want configuration error", server, err)
+			}
+		})
+	}
+	var typedNil *fakeStore
+	valid.Store = typedNil
+	if server, err := New(valid); err == nil || server != nil {
+		t.Fatalf("New(typed nil) = (%v, %v), want configuration error", server, err)
 	}
 }
 
