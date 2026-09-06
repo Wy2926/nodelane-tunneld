@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	MetadataRunID    = "nodelane_run_id"
-	MetadataRunToken = "nodelane_run_token"
+	MetadataRunID    = frpplugin.MetadataRunID
+	MetadataRunToken = frpplugin.MetadataRunToken
 )
 
 var (

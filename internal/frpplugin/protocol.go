@@ -17,6 +17,11 @@ const APIVersion = "0.1.0"
 
 const MaxRequestBytes = 64 << 10
 
+const (
+	MetadataRunID    = "nodelane_run_id"
+	MetadataRunToken = "nodelane_run_token"
+)
+
 var ErrRequestTooLarge = errors.New("callback request is too large")
 
 type Operation string
