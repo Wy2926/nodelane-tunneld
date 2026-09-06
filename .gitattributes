@@ -1,3 +1,10 @@
 # Keep POSIX shell scripts portable when the repository is checked out on Windows.
 *.sh text eol=lf
 Dockerfile text eol=lf
+
+# Fingerprinted frontend files must match the bytes emitted by Astro.
+internal/server/assets/web/**/*.css text eol=lf
+internal/server/assets/web/**/*.js text eol=lf
+internal/server/assets/web/**/*.html text eol=lf
+internal/server/assets/web/**/*.txt text eol=lf
+internal/server/assets/web/**/*.xml text eol=lf

@@ -9,7 +9,8 @@
     "preview": "astro preview",
     "check": "astro check",
     "test": "node --test tests/console.test.mjs tests/console-i18n.test.mjs tests/identity-settings.test.mjs tests/css-scale-contract.test.mjs tests/commands-shell.test.mjs",
-    "test:built": "pnpm build && node --test tests/console-built.test.mjs tests/console-lifecycle.test.mjs tests/design-system-built.test.mjs"
+    "test:built": "pnpm build && node --test tests/console-built.test.mjs tests/console-lifecycle.test.mjs tests/design-system-built.test.mjs",
+    "test:embedded": "node --test tests/embedded-assets.test.mjs"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.4",
