@@ -24,8 +24,7 @@ const (
 )
 
 type deadlinePipe interface {
-	io.ReadWriteCloser
-	SetReadDeadline(time.Time) error
+	io.WriteCloser
 	SetWriteDeadline(time.Time) error
 }
 
@@ -189,19 +188,14 @@ func (s *windowsSource) serve(pipe deadlinePipe) {
 		_ = windows.SetEvent(s.wake)
 	}()
 	deadline := time.Now().Add(pipeClientTimeout)
-	if pipe.SetReadDeadline(deadline) != nil || pipe.SetWriteDeadline(deadline) != nil {
+	if pipe.SetWriteDeadline(deadline) != nil {
 		return
 	}
+	// Full Close preserves buffered bytes for the reader and then delivers EOF.
+	// Disconnect must only be used for rejected or canceled pending instances.
 	if n, err := pipe.Write(s.credential); err != nil || n != len(s.credential) {
 		return
 	}
-	// A zero-byte message is EOF for os.ReadFile. Keep the connection alive until
-	// the reader closes so buffered bytes are not discarded; never use blocking Flush.
-	if _, err := pipe.Write(nil); err != nil {
-		return
-	}
-	var scratch [1]byte
-	_, _ = pipe.Read(scratch[:])
 }
 
 func (s *windowsSource) releasePending() {

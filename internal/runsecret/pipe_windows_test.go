@@ -3,13 +3,68 @@ package runsecret
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Microsoft/go-winio"
 	"golang.org/x/sys/windows"
 )
+
+func TestPipeClosePreservesBufferedCredentialAndEOF(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		for _, credential := range []string{testCredential, strings.Repeat("x", 4096)} {
+			t.Run(fmt.Sprintf("%d/%d", i, len(credential)), func(t *testing.T) {
+				t.Parallel()
+				assertClosedPipeCredential(t, credential)
+			})
+		}
+	}
+}
+
+func assertClosedPipeCredential(t *testing.T, credential string) {
+	t.Helper()
+	pipe, path := newTestPendingPipe(t)
+	client, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	if status, err := windows.WaitForSingleObject(pipe.operation.HEvent, 1000); err != nil || status != windows.WAIT_OBJECT_0 {
+		t.Fatalf("connect event: %d %v", status, err)
+	}
+	if err := pipe.complete(); err != nil {
+		t.Fatal(err)
+	}
+	server, err := winio.NewOpenFile(pipe.handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipe.handle = 0
+	pipe.close()
+	t.Cleanup(func() { _ = server.Close() })
+	written := make(chan error, 1)
+	go func() {
+		_, err := server.Write([]byte(credential))
+		_ = server.Close()
+		written <- err
+	}()
+	select {
+	case err := <-written:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("bounded credential was not buffered before the reader started")
+	}
+	data, err := io.ReadAll(client)
+	if err != nil || string(data) != credential {
+		t.Fatalf("closed writer lost buffered credential or EOF: size=%d err=%v", len(data), err)
+	}
+}
 
 func TestPendingPipeConnectSignalsItsOverlappedEvent(t *testing.T) {
 	pipe, path := newTestPendingPipe(t)
