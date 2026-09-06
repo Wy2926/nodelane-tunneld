@@ -9,7 +9,7 @@
 | 仓库 | 已验证的功能基准 | 当前边界 |
 | --- | --- | --- |
 | `nodelane-tunneld` | 功能基准 `c876e4e`，主要功能提交 `172038e`；发布源码 `1a64c38` | `0.5.0` 镜像和 `stable` 已发布；生产未部署，仍有下述缺口 |
-| `auth` | 本地 `main`：`a22e375`，实现提交 `0a7934e` | Logto 部署包、离线校验和操作手册完成；不是已配置好的真实身份租户 |
+| `auth` | 原功能基准 `a22e375`；发布源码 `18c92f9` | 统一主题及绑定修复本地已应用；`1.43.0-nodelane.1` 双架构镜像已发布，生产未部署 |
 | `nodelane-www` | 本地 `main`：`4c2f640` | 静态主站已增加保留语言的控制台入口，不读取 Session |
 
 上述提交是功能证据基准；本次文档清理及后续提交可能使 HEAD 前进。合入本地 `main`、推送 Git、发布镜像/客户端、部署和公网验收是不同状态。
@@ -57,6 +57,20 @@ dc up -d tunneld
 ```
 
 匿名初始化只针对确认过的全新命名空间，重复执行会拒绝；不是清理或重启命令。最后一步首次初始化 PostgreSQL。生产切换、真实身份/公开安装命令、ARM64 实机以及本节上方的未完验收仍须单独完成。
+
+## Logto 品牌与邮箱绑定修复
+
+2026-09-06 用户授权统一 Logto 登录页及 Account Center 风格、修复邮箱登录后的 Google 绑定入口，并提交 Auth / 发布配置镜像。Tunnel `0.5.0` 由并行发布任务处理，上节是它的独立结果；本节不覆盖生产、Google 控制台或用户身份变更。
+
+- **Git 与镜像。** Auth 源码提交 `18c92f9b5731192fa6627f3c81d0e38515f4ce80` 已本地提交；该仓库没有 remote，未虚构远端推送。`docker.nodelane.net/nodelane/auth:1.43.0-nodelane.1` 已发布并分别通过 Docker / regctl 回读为 `sha256:030c0cc95b31df8e602d7bebbc65203508305758b249f71cae669947104987a4`，包含 `linux/amd64`、`linux/arm64` 及两份构建证明；未发布 Auth `stable` 别名。普通推送被约 264 MB 原版层触发 `413`，改用固定 regctl 0.11.6 的 16 MiB 原生分块上传，同一 OCI Layout 的摘要完全不变，没有重建或改生产网关。
+- **发布验证。** 按上述摘要拉取后，amd64 与模拟 arm64 执行内置工具通过，Logto 均为 `1.43.0`，主题 SHA-256 为 `07a2c5e39b23359f6cd469f95cb1add6975b771a1382a3da7cbcb3eb3c814a2e`，CSS 无 CR；没有实际 ARM64 主机验收。原版层及运行配置逐项相同，仅增加两个 COPY 层。最终 auth 全套 295 项：291 通过、4 项 Windows/平台条件跳过；Go 密钥生成器测试通过。48 项品牌工具测试在 Windows 与隔离 Linux 各 47 通过、1 项异平台权限测试跳过。真实本地 TLS/Discovery/JWKS、Native 公共配置、BFF 登录跳转及主题无漂移检查通过；41 个 Git 候选文件仅含代码/资源，发布前私密值扫描无命中。
+- **根因和最小修复。** 原配置只有 `fields.social="Edit"` / `fields.password="Off"`，缺省 `fields.email` 等于 `Off`。原版 Logto 1.43.0 的 `/api/my-account` 隐藏 `primaryEmail`，但仍报告存在安全验证方式，导致 Account Center 列出空验证列表。现补 `fields.email="ReadOnly"`；已有批准的 `Edit` 保留。密码、自动关联仍关闭，绑定前二次验证不变，不合并既有账号。
+- **原生品牌扩展。** [auth/branding/nodelane.css](../../auth/branding/nodelane.css) 复用官网设计令牌和现有 PNG，经登录体验、Account Center 两处 `customCss` 注入；原版账号页面、协议、连接器和语言行为不复制、不打补丁。主题覆盖按钮、输入框、错误/禁用状态、账户行与菜单、窄窗口及 RTL，并解决原版邮箱行在窄桌面窗口中仅剩极窄文本列的问题。头像、Google 标识仍使用原生资产。
+- **配置与交付。** [apply-branding.mjs](../../auth/scripts/apply-branding.mjs) 默认只读计划，`--apply` 才 PATCH，`--check` 对漂移返回失败；外来 CSS 需显式替换参数，写前复查并写后回读，错误只记录端点名和固定诊断码。生产 issuer 精确绑定 `https://auth.nodelane.net/oidc`，本地显式 profile 固定 TLS + 回环解析。Windows ACL/POSIX 私密输入校验保留，凭据不在参数或输出中。镜像仅在原版固定层上 COPY `/opt/nodelane` 工具与 CSS，默认启动、数据库和租户不变。
+- **真实本地结果。** 现有本地租户已应用并回读无漂移。Chrome 的邮箱账号点击 Google「添加」后进入「验证您的邮箱」并显示发送按钮，原错误已消失；没有发送本次验证码，也没有执行 Google 最终绑定。固定原版函数的离线回归确认邮箱可读后仍要求已验证身份。邮箱验证码注册、CLI 撤销等既有结果不受影响。
+- **浏览器边界。** 已检查中文桌面、390/320 窄屏及阿拉伯语 RTL 登录，确认图片加载、固定按钮尺寸、主题颜色和无横向溢出；账户窄屏邮箱行及菜单可用。登录截图存于本任务可视化目录；包含账户信息的截图只存本地私密身份目录。当前模型仍无法读取截图图像，不能把这些结果称为目视像素验收或关闭 AC-UI-01。验证码发送/错误/到期/复用、Google 最终绑定及冲突拒绝仍待真人验收。
+
+上线必须使用正式 Logto 独立数据库、私有 Admin HTTPS、正确 Core TLS/反代、生产连接器与 Web/Native 应用。主题与 Account 设置属于数据库配置，单独拉镜像不会自动带入；[auth README 第 15 节](../../auth/README.md#15-registry-deployment)提供 digest 固定镜像、原生初始化、M2M 一次性主题应用和回读命令，不复用本地测试凭据。
 
 ## 本轮身份联调准备
 
